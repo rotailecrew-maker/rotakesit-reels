@@ -1,0 +1,74 @@
+name: rotakesit reels
+
+on:
+  schedule:
+    # GitHub Actions cron UTC calisir. Turkiye = UTC+3 (yil boyu sabit).
+    # NOT: zamanlanmis calismalar 5-30 dk gecikebilir, yogun saatlerde
+    # atlanabilir. Dakikasi onemliyse harici tetikleyici kullanin (bkz README).
+    - cron: "0 6 * * *"    # 09:00 TR
+    - cron: "0 15 * * *"   # 18:00 TR
+  workflow_dispatch:        # elle tetikleme
+    inputs:
+      dry_run:
+        description: "Instagram'a hicbir sey gonderme, sadece dogrula"
+        type: boolean
+        default: false
+
+concurrency:
+  group: rotakesit-reels
+  cancel-in-progress: false   # iki calisma cakisirsa ikincisi bekler, iptal olmaz
+
+permissions:
+  contents: read              # script GITHUB_TOKEN kullanmiyor, en dar yetki
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    # Bütce: indirme + upload 600s + poll 480s + kurulum. 30 dk yetmiyordu.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Bagimliliklar
+        run: pip install --quiet -r requirements.txt
+
+      - name: Reel yayinla
+        env:
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_APP_ID: ${{ secrets.IG_APP_ID }}
+          IG_APP_SECRET: ${{ secrets.IG_APP_SECRET }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_QUEUE_FOLDER_ID: ${{ secrets.DRIVE_QUEUE_FOLDER_ID }}
+          DRIVE_PUBLISHED_FOLDER_ID: ${{ secrets.DRIVE_PUBLISHED_FOLDER_ID }}
+          DRIVE_FAILED_FOLDER_ID: ${{ secrets.DRIVE_FAILED_FOLDER_ID }}
+          # Opsiyonel ayarlar — repo Variables'tan (secret degil) gelir
+          USER_TAGS: ${{ vars.USER_TAGS }}
+          GRAPH_VERSION: ${{ vars.GRAPH_VERSION }}
+          PUBLISHED_RETENTION_DAYS: ${{ vars.PUBLISHED_RETENTION_DAYS }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+        run: python post_reel.py
+
+      - name: Hata bildirimi
+        if: failure()
+        env:
+          NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$NOTIFY_WEBHOOK" ]; then
+            echo "NOTIFY_WEBHOOK tanimli degil, bildirim atlandi"
+            exit 0
+          fi
+          MSG="rotakesit reels BASARISIZ - $RUN_URL"
+          # content = Discord, text = Slack. Ikisini de gonderiyoruz ki
+          # webhook'un hangisi oldugunu bilmek gerekmesin.
+          jq -n --arg m "$MSG" '{content: $m, text: $m}' \
+            | curl -sS -X POST -H "Content-Type: application/json" \
+                   -d @- "$NOTIFY_WEBHOOK" > /dev/null
+          echo "Bildirim gonderildi"

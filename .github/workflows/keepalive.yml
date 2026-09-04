@@ -1,0 +1,78 @@
+name: keepalive + token yenileme
+
+# Iki sessiz olum sebebini birden onler:
+#
+#   1. GitHub, 60 gun commit almayan repolarda zamanlanmis workflow'lari
+#      otomatik DEVRE DISI birakir. Bu otomasyon dogasi geregi commit almaz,
+#      yani kurulduktan 60 gun sonra kendiliginden dururdu.
+#   2. IG long-lived token'i 60 gunde doluyor.
+#
+# Ikisi de ayni takvimde oldugu icin tek workflow'la cozuluyor.
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"      # her pazartesi 07:00 TR
+  workflow_dispatch:
+
+concurrency:
+  group: rotakesit-keepalive
+  cancel-in-progress: false
+
+permissions:
+  contents: write            # bos commit atabilmek icin
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Bagimliliklar
+        run: pip install --quiet -r requirements.txt
+
+      - name: Token omrunu kontrol et ve gerekiyorsa yenile
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_APP_ID: ${{ secrets.IG_APP_ID }}
+          IG_APP_SECRET: ${{ secrets.IG_APP_SECRET }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_REPOSITORY: ${{ github.repository }}
+          REFRESH_BEFORE_DAYS: ${{ vars.REFRESH_BEFORE_DAYS }}
+        run: |
+          if [ -z "$IG_APP_ID" ] || [ -z "$IG_APP_SECRET" ]; then
+            echo "IG_APP_ID / IG_APP_SECRET tanimli degil, token yenileme atlandi"
+            exit 0
+          fi
+          python refresh_token.py
+
+      - name: Repoyu canli tut
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive
+          git add .keepalive
+          if git diff --staged --quiet; then
+            echo "Degisiklik yok"
+          else
+            git commit -m "chore: keepalive (zamanlanmis workflow'lar kapanmasin)"
+            git push
+          fi
+
+      - name: Hata bildirimi
+        if: failure()
+        env:
+          NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$NOTIFY_WEBHOOK" ]; then exit 0; fi
+          MSG="rotakesit keepalive/token yenileme BASARISIZ - $RUN_URL"
+          jq -n --arg m "$MSG" '{content: $m, text: $m}' \
+            | curl -sS -X POST -H "Content-Type: application/json" \
+                   -d @- "$NOTIFY_WEBHOOK" > /dev/null

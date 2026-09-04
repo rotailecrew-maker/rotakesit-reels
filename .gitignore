@@ -1,0 +1,22 @@
+# Sirlar — .env ASLA commit edilmemeli
+.env
+.env.*
+!.env.example
+*.pem
+*service-account*.json
+credentials.json
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Yerel calisma dosyalari
+*.log
+state.json
+*.mp4
+*.mov
+.DS_Store
+Thumbs.db

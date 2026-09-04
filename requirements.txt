@@ -1,0 +1,10 @@
+# Sabitlenmis surumler — pip install <paket> (surumsuz) CI'yi bir gun
+# habersiz kirar. Guncellemek icin: pip install -U -r requirements.txt
+# ardindan pip freeze ile buraya yazin ve DRY_RUN ile test edin.
+
+requests==2.32.3
+google-api-python-client==2.149.0
+google-auth==2.35.0
+
+# refresh_token.py'nin GitHub secret'ini otomatik guncelleyebilmesi icin
+PyNaCl==1.5.0

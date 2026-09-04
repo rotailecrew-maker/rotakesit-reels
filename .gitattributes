@@ -1,0 +1,5 @@
+# Workflow'lar Linux runner'da calisir — CRLF shell adimlarini bozar
+* text=auto eol=lf
+*.png binary
+*.mp4 binary
+*.mov binary
