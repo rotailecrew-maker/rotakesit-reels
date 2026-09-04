@@ -28,7 +28,7 @@ sadece videolar hareket eder.
 | `post_reel.py` | Ana akış — kuyruktan bir video alır, paylaşır, taşır |
 | `setup_oauth.py` | Bir kerelik Drive yetkilendirmesi |
 | `refresh_token.py` | IG token'ının 60 günde ölmesini engeller |
-| `.github/workflows/reels.yml` | Günde 2 paylaşım (09:00 / 18:00 TR) |
+| `.github/workflows/reels.yml` | Günde 2 paylaşım (09:17 / 18:17 TR) |
 | `.github/workflows/keepalive.yml` | Haftalık: token yenileme + repo'yu canlı tutma |
 
 ---
@@ -196,9 +196,10 @@ python refresh_token.py --check
 
 ## Bilinen sınırlar
 
-- **Cron kayması.** GitHub zamanlanmış çalışmaları 5-30 dk geciktirir, yoğun
-  saatlerde atlayabilir. Dakikası önemliyse harici tetikleyici
-  (cron-job.org → `workflow_dispatch`) kullanın.
+- **Cron kayması.** GitHub zamanlanmış çalışmaları geciktirir, yoğun saatlerde
+  tamamen atlayabilir. Saat başı (`:00`) en kötü an — bu yüzden cron `:17`'ye
+  alındı. Dakikası önemliyse harici tetikleyici (cron-job.org →
+  `workflow_dispatch`) kullanın; `workflow_dispatch` kuyruğa girmez.
 - **60 gün kuralı.** GitHub, commit almayan repolarda cron'u kapatır.
   `keepalive.yml` haftalık boş commit atarak önler — silmeyin.
 - **OAuth consent "Testing" modu** refresh token'ı 7 günde öldürür.
