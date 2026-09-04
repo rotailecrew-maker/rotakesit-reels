@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-rotakesit — Instagram Reels otomasyonu
+rotakesit - Instagram Reels otomasyonu
 
 Akis:
   1. Drive QUEUE klasorunden siradaki videoyu sec (dogal siralama)
@@ -30,14 +30,23 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
+# Windows konsolu cp1254/cp850 olabiliyor; DRY_RUN caption'i basarken
+# Turkce karakterler UnicodeEncodeError'a yol acmasin
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+
 
 # --------------------------------------------------------------------------
-# Hata siniflari — retry sayacinin yanip yanmayacagini bunlar belirler
+# Hata siniflari - retry sayacinin yanip yanmayacagini bunlar belirler
 # --------------------------------------------------------------------------
 
 class TransientError(Exception):
     """Dosyayla ilgisi olmayan hata (token, kota, ag, izin).
-    Retry sayaci ARTMAZ — yoksa saglam videolar FAILED'a surulur."""
+    Retry sayaci ARTMAZ - yoksa saglam videolar FAILED'a surulur."""
 
 
 class FileError(Exception):
@@ -81,7 +90,7 @@ def _validate_env():
     missing = [k for k in REQUIRED_ENV if not os.environ.get(k, "").strip()]
     if missing:
         sys.exit(
-            "HATA — su ortam degiskenleri eksik veya bos: "
+            "HATA - su ortam degiskenleri eksik veya bos: "
             + ", ".join(missing)
             + "\nGitHub Actions kullaniyorsaniz: Settings > Secrets and variables"
               " > Actions altinda tanimli olduklarindan emin olun."
@@ -95,14 +104,14 @@ def _validate_env():
     }
     if len(set(folders.values())) != 3:
         sys.exit(
-            "HATA — uc Drive klasor ID'si birbirinden farkli olmali. "
+            "HATA - uc Drive klasor ID'si birbirinden farkli olmali. "
             "Ayni deger girilmis, dosyalar kendi klasorune tasinmaya calisir."
         )
 
     try:
         json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
     except json.JSONDecodeError as e:
-        sys.exit(f"HATA — GOOGLE_SERVICE_ACCOUNT_JSON gecerli JSON degil: {e}")
+        sys.exit(f"HATA - GOOGLE_SERVICE_ACCOUNT_JSON gecerli JSON degil: {e}")
 
 
 _validate_env()
@@ -121,7 +130,7 @@ RUPLOAD_HOST = f"https://rupload.facebook.com/ig-api-upload/{GRAPH_VERSION}"
 IG_USER_ID = os.environ["IG_USER_ID"].strip()
 IG_ACCESS_TOKEN = os.environ["IG_ACCESS_TOKEN"].strip()
 
-# Opsiyonel — varsa token omru dogru sekilde sorgulanir ve yenileme yapilabilir
+# Opsiyonel - varsa token omru dogru sekilde sorgulanir ve yenileme yapilabilir
 IG_APP_ID = os.environ.get("IG_APP_ID", "").strip()
 IG_APP_SECRET = os.environ.get("IG_APP_SECRET", "").strip()
 
@@ -129,7 +138,7 @@ QUEUE_FOLDER_ID = os.environ["DRIVE_QUEUE_FOLDER_ID"].strip()
 PUBLISHED_FOLDER_ID = os.environ["DRIVE_PUBLISHED_FOLDER_ID"].strip()
 FAILED_FOLDER_ID = os.environ["DRIVE_FAILED_FOLDER_ID"].strip()
 
-# Etiketler — Reels'te user_tags sadece username alir, x/y koordinati yok
+# Etiketler - Reels'te user_tags sadece username alir, x/y koordinati yok
 USER_TAGS = [
     u.strip().lstrip("@")
     for u in os.environ.get("USER_TAGS", "rota,rotaile,ramedyaresmi").split(",")
@@ -163,7 +172,7 @@ STATE_RETENTION_DAYS = _int_env("STATE_RETENTION_DAYS", 90)
 # (kalici silme yok, 30 gun icinde geri alinabilir).
 PUBLISHED_RETENTION_DAYS = _int_env("PUBLISHED_RETENTION_DAYS", 0)
 
-# Graph API hata kodlari — bunlar dosyanin sucu degil, retry sayacini yakmasinlar
+# Graph API hata kodlari - bunlar dosyanin sucu degil, retry sayacini yakmasinlar
 TRANSIENT_GRAPH_CODES = {
     1,    # Unknown / gecici
     2,    # Service temporarily unavailable
@@ -171,7 +180,7 @@ TRANSIENT_GRAPH_CODES = {
     10,   # Permission denied
     17,   # User request limit reached
     32,   # Page request limit reached
-    100,  # Invalid parameter — pratikte konfig hatasi
+    100,  # Invalid parameter - pratikte konfig hatasi
     102,  # Session expired
     190,  # Access token gecersiz / suresi dolmus
     200,  # Permissions error
@@ -227,7 +236,7 @@ def graph_failure(resp, context):
 def drive_exec(request, context):
     """Drive cagrilarini calistirir, hatalari siniflandirir.
 
-    403 (izin/kota), 404 (paylasilmamis), 429 (rate limit), 5xx (sunucu) —
+    403 (izin/kota), 404 (paylasilmamis), 429 (rate limit), 5xx (sunucu) -
     hicbiri videonun sucu degil, hepsi TransientError.
     """
     try:
@@ -261,7 +270,7 @@ def check_token_expiry():
         return
 
     if data.get("is_valid") is False:
-        log("!!! TOKEN GECERSIZ — yenilenmeden hicbir paylasim yapilamaz "
+        log("!!! TOKEN GECERSIZ - yenilenmeden hicbir paylasim yapilamaz "
             "(bkz README > Token yenileme)")
         return
 
@@ -273,9 +282,9 @@ def check_token_expiry():
     left = datetime.fromtimestamp(expires_at, timezone.utc) - datetime.now(timezone.utc)
     days = left.days
     if days <= 0:
-        log("!!! TOKEN SURESI DOLMUS — yenilenmeli")
+        log("!!! TOKEN SURESI DOLMUS - yenilenmeli")
     elif days <= TOKEN_WARN_DAYS:
-        log(f"!!! TOKEN {days} GUN SONRA DOLUYOR — refresh_token.py calistirin")
+        log(f"!!! TOKEN {days} GUN SONRA DOLUYOR - refresh_token.py calistirin")
     else:
         log(f"Token gecerli, {days} gun omru kaldi")
 
@@ -365,7 +374,7 @@ def move_file(drive, file_id, from_folder, to_folder):
 
 
 def trash_file(drive, file_id):
-    """Kalici silmez — Drive cop kutusuna tasir, 30 gun geri alinabilir."""
+    """Kalici silmez - Drive cop kutusuna tasir, 30 gun geri alinabilir."""
     drive_exec(
         drive.files().update(fileId=file_id, body={"trashed": True},
                              supportsAllDrives=True),
@@ -381,7 +390,7 @@ def load_state(drive, files):
     """(state_file_id, state, ok) dondurur.
 
     ok=False ise state.json var ama okunamadi. O durumda UZERINE YAZMADAN
-    cikmak gerekir — yoksa tum yayin gecmisi ve retry sayaclari silinir.
+    cikmak gerekir - yoksa tum yayin gecmisi ve retry sayaclari silinir.
     """
     for f in files:
         if f["name"] == STATE_FILENAME:
@@ -438,7 +447,7 @@ def save_state(drive, state_file_id, state):
 def prune_state(state, files):
     """Kuyrukta artik olmayan ve suresi gecmis kayitlari atar.
 
-    Kuyrukta HALA duran hicbir kayda dokunmaz — yoksa 'published' isareti
+    Kuyrukta HALA duran hicbir kayda dokunmaz - yoksa 'published' isareti
     kaybolur ve video ikinci kez paylasilir.
     """
     if STATE_RETENTION_DAYS <= 0:
@@ -472,7 +481,7 @@ def prune_state(state, files):
 # --------------------------------------------------------------------------
 
 def render_default_caption(stem):
-    """format() yerine replace — dosya adindaki { } cokmeye yol acmasin."""
+    """format() yerine replace - dosya adindaki { } cokmeye yol acmasin."""
     return DEFAULT_CAPTION.replace("{name}", stem)
 
 
@@ -542,7 +551,7 @@ def create_container(caption):
 
     if r.status_code != 200 or "id" not in body:
         err = body.get("error", {}) if isinstance(body, dict) else {}
-        # user_tags kaynakli hatada etiketsiz tekrar dene — post kaybolmasin
+        # user_tags kaynakli hatada etiketsiz tekrar dene - post kaybolmasin
         if USER_TAGS and "user_tags" in json.dumps(err):
             log(f"user_tags reddedildi ({err.get('message')}), etiketsiz deneniyor")
             params.pop("user_tags")
@@ -585,11 +594,11 @@ def upload_video(container_id, path):
     """Video byte'larini rupload'a yukler; kopan yuklemeyi kaldigi yerden surdurur.
 
     Onceki surum upload_type=resumable ile session aciyor ama tek seferde
-    offset=0'dan yukluyordu — 180. MB'ta kopan bir yukleme bastan basliyordu.
+    offset=0'dan yukluyordu - 180. MB'ta kopan bir yukleme bastan basliyordu.
     """
     size = os.path.getsize(path)
     if size > MAX_VIDEO_BYTES:
-        raise FileError(f"Video {size / 1024 / 1024:.0f} MB — IG siniri 1024 MB")
+        raise FileError(f"Video {size / 1024 / 1024:.0f} MB - IG siniri 1024 MB")
 
     offset = 0
     last_error = None
@@ -721,7 +730,7 @@ def find_recent_media(caption, minutes=60):
 # --------------------------------------------------------------------------
 
 def natural_key(name):
-    """'10.mp4' > '2.mp4' olsun diye — duz sort bunun tersini yapar."""
+    """'10.mp4' > '2.mp4' olsun diye - duz sort bunun tersini yapar."""
     return [int(p) if p.isdigit() else p.lower()
             for p in re.split(r"(\d+)", name)]
 
@@ -792,7 +801,7 @@ def cleanup_published(drive):
 
 def run_dry(drive, files, state):
     """Instagram'a hicbir sey gondermeden tum zinciri dogrular."""
-    log("DRY RUN — Instagram'a istek gonderilmeyecek, state yazilmayacak")
+    log("DRY RUN - Instagram'a istek gonderilmeyecek, state yazilmayacak")
     video = pick_next(files, state)
     if not video:
         log("Kuyrukta yayinlanacak video yok")
@@ -813,7 +822,7 @@ def run_dry(drive, files, state):
     try:
         log("Indirme dogrulaniyor...")
         actual = download_file(drive, video, tmp_path)
-        log(f"Indirme tamam: {actual} bayt — Drive erisimi ve butunluk OK")
+        log(f"Indirme tamam: {actual} bayt - Drive erisimi ve butunluk OK")
     finally:
         if os.path.exists(tmp_path):
             try:
@@ -821,7 +830,7 @@ def run_dry(drive, files, state):
             except OSError:
                 pass
 
-    log("DRY RUN basarili — canli calisma icin DRY_RUN degiskenini kaldirin")
+    log("DRY RUN basarili - canli calisma icin DRY_RUN degiskenini kaldirin")
     return 0
 
 
@@ -834,7 +843,7 @@ def _safe_save(drive, state_file_id, state):
 
 
 def main():
-    log(f"rotakesit reels — {'DRY RUN' if DRY_RUN else 'canli mod'}")
+    log(f"rotakesit reels - {'DRY RUN' if DRY_RUN else 'canli mod'}")
     check_token_expiry()
 
     drive = drive_client()
@@ -863,7 +872,7 @@ def main():
     entry = state.setdefault(video["id"], {"retries": 0})
     caption, caption_file_id = resolve_caption(drive, files, video["name"])
 
-    # Indirmeden once boyut kontrolu — bosuna 20 dakika harcamayalim
+    # Indirmeden once boyut kontrolu - bosuna 20 dakika harcamayalim
     declared = int(video.get("size") or 0)
     if declared > MAX_VIDEO_BYTES:
         entry["retries"] = MAX_RETRIES
@@ -872,7 +881,7 @@ def main():
         entry["last_attempt"] = datetime.now(timezone.utc).isoformat()
         state[video["id"]] = entry
         _safe_save(drive, state_file_id, state)
-        log(f"HATA: {entry['last_error']} — sonraki calismada FAILED'a tasinacak")
+        log(f"HATA: {entry['last_error']} - sonraki calismada FAILED'a tasinacak")
         return 1
 
     tmp_path = os.path.join(tempfile.gettempdir(), video["name"])
@@ -891,7 +900,7 @@ def main():
         wait_until_finished(container_id)
 
         media_id = publish(container_id)
-        log(f"YAYINLANDI — media_id: {media_id}")
+        log(f"YAYINLANDI - media_id: {media_id}")
 
     except Exception as e:
         # Yayin gercekten olmus ama yanit kaybolmus olabilir
@@ -899,7 +908,7 @@ def main():
             recovered = find_recent_media(caption)
             if recovered:
                 media_id = recovered
-                log(f"Hata alindi ama reel yayinlanmis (media_id: {media_id}) — "
+                log(f"Hata alindi ama reel yayinlanmis (media_id: {media_id}) - "
                     f"cift paylasim engellendi. Bastirilan hata: {e}")
 
         if not media_id:
@@ -915,7 +924,7 @@ def main():
                 _safe_save(drive, state_file_id, state)
                 log(f"DOSYA HATASI (deneme {entry['retries']}/{MAX_RETRIES}): {e}")
                 if entry["retries"] >= MAX_RETRIES:
-                    log("Deneme hakki bitti — sonraki calismada FAILED'a tasinacak")
+                    log("Deneme hakki bitti - sonraki calismada FAILED'a tasinacak")
             else:
                 entry["last_error_kind"] = "transient"
                 state[video["id"]] = entry
@@ -943,7 +952,7 @@ def main():
     state[video["id"]] = entry
     save_state(drive, state_file_id, state)
 
-    # Tasima hatasi yayini gecersiz kilmaz — job'u FAIL ETME, sadece uyar
+    # Tasima hatasi yayini gecersiz kilmaz - job'u FAIL ETME, sadece uyar
     try:
         move_file(drive, video["id"], QUEUE_FOLDER_ID, PUBLISHED_FOLDER_ID)
         if caption_file_id:

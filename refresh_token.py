@@ -9,7 +9,7 @@ Bu script:
   1. Mevcut token'in omrunu sorar
   2. REFRESH_BEFORE_DAYS'ten az kaldiysa fb_exchange_token ile yenisini alir
   3. GH_TOKEN varsa yeni token'i GitHub secret'ina yazar (libsodium ile sifreli)
-     yoksa sadece "elle guncelleyin" der — token'i ASLA log'a basmaz
+     yoksa sadece "elle guncelleyin" der - token'i ASLA log'a basmaz
 
 Calistirma:
   python refresh_token.py            # gerekiyorsa yeniler
@@ -19,8 +19,8 @@ Calistirma:
 Gerekli:
   IG_APP_ID, IG_APP_SECRET, IG_ACCESS_TOKEN
 Opsiyonel (secret'i otomatik guncellemek icin):
-  GH_TOKEN      — repoda "Secrets: read and write" yetkili PAT
-  GH_REPOSITORY — "kullanici/repo" (Actions icinde otomatik gelir)
+  GH_TOKEN      - repoda "Secrets: read and write" yetkili PAT
+  GH_REPOSITORY - "kullanici/repo" (Actions icinde otomatik gelir)
 """
 
 import base64
@@ -53,7 +53,7 @@ def log(msg):
 def require(*names):
     missing = [n for n in names if not os.environ.get(n, "").strip()]
     if missing:
-        sys.exit(f"HATA — eksik ortam degiskeni: {', '.join(missing)}")
+        sys.exit(f"HATA - eksik ortam degiskeni: {', '.join(missing)}")
 
 
 def token_days_left():
@@ -65,7 +65,7 @@ def token_days_left():
     )
     body = r.json()
     if "error" in body:
-        sys.exit(f"HATA — debug_token: {body['error'].get('message')}")
+        sys.exit(f"HATA - debug_token: {body['error'].get('message')}")
 
     data = body.get("data", {})
     if data.get("is_valid") is False:
@@ -91,7 +91,7 @@ def exchange():
     )
     body = r.json()
     if "access_token" not in body:
-        sys.exit(f"HATA — token degistirilemedi: {json.dumps(body)[:300]}")
+        sys.exit(f"HATA - token degistirilemedi: {json.dumps(body)[:300]}")
     return body["access_token"]
 
 
@@ -150,7 +150,7 @@ def main():
 
     days = token_days_left()
     if days == -1:
-        log("Token GECERSIZ — yenileme ise yaramaz, Graph API Explorer'dan "
+        log("Token GECERSIZ - yenileme ise yaramaz, Graph API Explorer'dan "
             "yeni bir token uretmeniz gerekiyor (bkz README).")
         return 2
     if days is None:
@@ -179,7 +179,7 @@ def main():
     log("    1. Graph API Explorer > uygulamaniz > token'i kopyalayin")
     log("    2. Repo > Settings > Secrets and variables > Actions")
     log(f"    3. {SECRET_NAME} secret'ini guncelleyin")
-    log("    (Otomatiklestirmek icin GH_TOKEN secret'i ekleyin — bkz README)")
+    log("    (Otomatiklestirmek icin GH_TOKEN secret'i ekleyin - bkz README)")
     return 1
 
 
