@@ -165,8 +165,15 @@ Retry sayacı **yalnızca dosyanın kendi hatalarında** artar:
 
 | Hata türü | Örnek | Sayaç |
 |---|---|---|
-| `FileError` | Container ERROR, 1 GB aşımı, eksik indirme | **artar** |
-| `TransientError` | Token dolmuş, rate limit, ağ kopması, Drive 403/5xx | **artmaz** |
+| `FileError` | Container ERROR (`status_code=ERROR`), 1 GB aşımı, eksik indirme | **artar** |
+| `TransientError` | Token dolmuş, rate limit, ağ kopması, Drive 403/5xx, **yükleme hataları** | **artmaz** |
+
+**Yükleme hataları neden dosya hatası sayılmaz:** `rupload.facebook.com` sadece
+byte alır, video içeriğini doğrulamaz — içerik kontrolü sonraki adımda,
+`status_code=ERROR` ile yapılır. Dolayısıyla bir yükleme hatası videonun bozuk
+olduğunun kanıtı değildir. Meta'nın `ProcessingFailedError`'ı (`retriable:false`
+dese bile) spec'i kusursuz videolarda da görülüyor. Yükleme patlarsa aynı çalışma
+içinde sıfırdan yeni container ile tekrar denenir (`CONTAINER_ATTEMPTS`).
 
 Bu ayrım olmasaydı: token'ın dolduğu bir haftada her çalışma sıradaki videonun
 bir retry hakkını yakar, 3 çalışmada **kusursuz bir video** `failed/` klasörüne

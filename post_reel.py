@@ -195,6 +195,8 @@ POLL_INTERVAL = 5                                      # saniye
 POLL_TIMEOUT = _int_env("POLL_TIMEOUT", 480)           # 8 dk
 UPLOAD_TIMEOUT = _int_env("UPLOAD_TIMEOUT", 600)       # 10 dk / deneme
 UPLOAD_ATTEMPTS = _int_env("UPLOAD_ATTEMPTS", 3)
+# Yukleme tamamen basarisiz olursa sifirdan yeni container ile kac kez denensin
+CONTAINER_ATTEMPTS = _int_env("CONTAINER_ATTEMPTS", 2)
 # En kotu senaryo ~ indirme + 10 dk + 8 dk. Workflow timeout'u 45 dk.
 
 VIDEO_EXTS = (".mp4", ".mov")
@@ -723,13 +725,14 @@ def upload_video(container_id, path):
             log(f"Yuklendi: {size / 1024 / 1024:.1f} MB")
             return
 
-        if r.status_code >= 500 or r.status_code == 429:
-            last_error = f"HTTP {r.status_code}: {r.text[:200]}"
-            log(f"Yukleme reddedildi ({last_error}), tekrar denenecek")
-            offset = upload_offset(container_id)
-            continue
-
-        raise graph_failure(r, "Yukleme basarisiz")
+        # rupload sadece byte alir, video icerigini DOGRULAMAZ - icerik
+        # kontrolu wait_until_finished'te yapilir (status_code=ERROR).
+        # Bu yuzden yukleme hatasi "video bozuk" demek degildir ve retry
+        # sayacini yakmamalidir. ProcessingFailedError bunun tipik ornegi:
+        # retriable:false dese de spec'i kusursuz videolarda da gorulur.
+        last_error = f"HTTP {r.status_code}: {r.text[:200]}"
+        log(f"Yukleme reddedildi ({last_error}), tekrar denenecek")
+        offset = upload_offset(container_id)
 
     raise TransientError(
         f"Yukleme {UPLOAD_ATTEMPTS} denemede tamamlanamadi. Son hata: {last_error}")
@@ -1036,11 +1039,23 @@ def main():
         actual = download_file(drive, video, tmp_path)
         log(f"Indirildi: {actual / 1024 / 1024:.1f} MB")
 
-        container_id = create_container(caption)
-        log(f"Container: {container_id}")
-
-        upload_video(container_id, tmp_path)
-        wait_until_finished(container_id)
+        last_err = None
+        for deneme in range(1, CONTAINER_ATTEMPTS + 1):
+            try:
+                container_id = create_container(caption)
+                log(f"Container: {container_id}"
+                    + (f" (deneme {deneme}/{CONTAINER_ATTEMPTS})" if deneme > 1 else ""))
+                upload_video(container_id, tmp_path)
+                wait_until_finished(container_id)
+                break
+            except TransientError as err:
+                # Patlayan container kullanilamaz, sifirdan yenisi acilir
+                last_err, container_id = err, None
+                if deneme < CONTAINER_ATTEMPTS:
+                    log(f"Gecici hata, yeni container ile tekrar: {err}")
+                    time.sleep(10)
+        else:
+            raise last_err
 
         media_id = publish(container_id)
         log(f"YAYINLANDI - media_id: {media_id}")
