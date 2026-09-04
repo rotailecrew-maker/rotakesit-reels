@@ -5,6 +5,7 @@
 requests==2.32.3
 google-api-python-client==2.149.0
 google-auth==2.35.0
+google-auth-oauthlib==1.2.1   # setup_oauth.py
 
 # refresh_token.py'nin GitHub secret'ini otomatik guncelleyebilmesi icin
 PyNaCl==1.5.0

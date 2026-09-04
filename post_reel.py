@@ -2,13 +2,27 @@
 """
 rotakesit - Instagram Reels otomasyonu
 
+Drive yapisi:
+    RA 1/                        <- DRIVE_ROOT_FOLDER_ID
+    |-- 1. Hafta/
+    |   |-- Reels/               <- videolar (kuyruk)
+    |   +-- Capitons/            <- caption'lar, video adiyla ayni .txt
+    |-- 2. Hafta/
+    |   +-- ...
+    |-- published/               <- yayinlanan videolar buraya tasinir
+    +-- failed/                  <- 3 denemede yayinlanamayanlar
+
 Akis:
-  1. Drive QUEUE klasorunden siradaki videoyu sec (dogal siralama)
-  2. Ayni isimli .txt varsa caption'i oradan al, yoksa varsayilan sablon
-  3. Videoyu indir + boyut dogrula -> IG resumable upload -> poll -> publish
-  4. Basarili: dosyayi (ve caption'ini) PUBLISHED klasorune tasi
-  5. Hatali: SADECE dosyaya ozgu hatalarda retry sayacini artir;
-     token/kota/ag hatalari sayaci yakmaz. MAX_RETRIES'te FAILED'a tasi.
+  1. Hafta klasorlerini dogal sirayla gez (1. Hafta -> 2. Hafta -> 10. Hafta)
+  2. Ilk uygun videoyu bul; hafta bitince sonrakine gec
+  3. Caption'i o haftanin Capitons/ klasorunden ayni adla al
+  4. Indir + boyut dogrula -> IG resumable upload -> poll -> publish
+  5. Basarili: videoyu kokteki published/ klasorune tasi
+  6. Hatali: SADECE dosyaya ozgu hatalarda retry sayacini artir;
+     token/kota/ag hatalari sayaci yakmaz. MAX_RETRIES'te failed/ klasorune.
+
+Caption dosyalari YERINDE KALIR - kutuphane gibi kullanildiklari icin
+tasinmazlar, sadece videolar hareket eder.
 
 Calistirma:
   python post_reel.py            # canli
@@ -25,7 +39,6 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import requests
-from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
@@ -39,14 +52,13 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
-
 # --------------------------------------------------------------------------
 # Hata siniflari - retry sayacinin yanip yanmayacagini bunlar belirler
 # --------------------------------------------------------------------------
 
 class TransientError(Exception):
     """Dosyayla ilgisi olmayan hata (token, kota, ag, izin).
-    Retry sayaci ARTMAZ - yoksa saglam videolar FAILED'a surulur."""
+    Retry sayaci ARTMAZ - yoksa saglam videolar failed/ klasorune surulur."""
 
 
 class FileError(Exception):
@@ -61,14 +73,11 @@ class FileError(Exception):
 # Bu yuzden os.environ[...] korumasi yetmez; acik kontrol sart.
 # --------------------------------------------------------------------------
 
-REQUIRED_ENV = (
-    "IG_USER_ID",
-    "IG_ACCESS_TOKEN",
-    "GOOGLE_SERVICE_ACCOUNT_JSON",
-    "DRIVE_QUEUE_FOLDER_ID",
-    "DRIVE_PUBLISHED_FOLDER_ID",
-    "DRIVE_FAILED_FOLDER_ID",
-)
+REQUIRED_ENV = ("IG_USER_ID", "IG_ACCESS_TOKEN", "DRIVE_ROOT_FOLDER_ID")
+
+OAUTH_ENV = ("GOOGLE_OAUTH_CLIENT_ID",
+             "GOOGLE_OAUTH_CLIENT_SECRET",
+             "GOOGLE_OAUTH_REFRESH_TOKEN")
 
 
 def _bool_env(name, default=False):
@@ -86,6 +95,14 @@ def _int_env(name, default):
         return default
 
 
+def _has_oauth():
+    return all(os.environ.get(k, "").strip() for k in OAUTH_ENV)
+
+
+def _has_service_account():
+    return bool(os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip())
+
+
 def _validate_env():
     missing = [k for k in REQUIRED_ENV if not os.environ.get(k, "").strip()]
     if missing:
@@ -97,21 +114,21 @@ def _validate_env():
               " Tanimsiz bir secret hata vermez, sessizce bos gelir."
         )
 
-    folders = {
-        "DRIVE_QUEUE_FOLDER_ID": os.environ["DRIVE_QUEUE_FOLDER_ID"].strip(),
-        "DRIVE_PUBLISHED_FOLDER_ID": os.environ["DRIVE_PUBLISHED_FOLDER_ID"].strip(),
-        "DRIVE_FAILED_FOLDER_ID": os.environ["DRIVE_FAILED_FOLDER_ID"].strip(),
-    }
-    if len(set(folders.values())) != 3:
+    if not _has_oauth() and not _has_service_account():
         sys.exit(
-            "HATA - uc Drive klasor ID'si birbirinden farkli olmali. "
-            "Ayni deger girilmis, dosyalar kendi klasorune tasinmaya calisir."
+            "HATA - Drive kimlik bilgisi yok. Ikisinden biri gerekli:\n"
+            "  (onerilen) " + ", ".join(OAUTH_ENV) + "\n"
+            "             -> python setup_oauth.py ile uretilir\n"
+            "  (Shared Drive kullaniyorsaniz) GOOGLE_SERVICE_ACCOUNT_JSON\n"
+            "     UYARI: service account kisisel My Drive'da dosya olusturamaz"
+            " ve tasiyamaz."
         )
 
-    try:
-        json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    except json.JSONDecodeError as e:
-        sys.exit(f"HATA - GOOGLE_SERVICE_ACCOUNT_JSON gecerli JSON degil: {e}")
+    if _has_service_account() and not _has_oauth():
+        try:
+            json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+        except json.JSONDecodeError as e:
+            sys.exit(f"HATA - GOOGLE_SERVICE_ACCOUNT_JSON gecerli JSON degil: {e}")
 
 
 _validate_env()
@@ -130,13 +147,23 @@ RUPLOAD_HOST = f"https://rupload.facebook.com/ig-api-upload/{GRAPH_VERSION}"
 IG_USER_ID = os.environ["IG_USER_ID"].strip()
 IG_ACCESS_TOKEN = os.environ["IG_ACCESS_TOKEN"].strip()
 
-# Opsiyonel - varsa token omru dogru sekilde sorgulanir ve yenileme yapilabilir
+# Opsiyonel - varsa token omru dogru sorgulanir ve yenileme yapilabilir
 IG_APP_ID = os.environ.get("IG_APP_ID", "").strip()
 IG_APP_SECRET = os.environ.get("IG_APP_SECRET", "").strip()
 
-QUEUE_FOLDER_ID = os.environ["DRIVE_QUEUE_FOLDER_ID"].strip()
-PUBLISHED_FOLDER_ID = os.environ["DRIVE_PUBLISHED_FOLDER_ID"].strip()
-FAILED_FOLDER_ID = os.environ["DRIVE_FAILED_FOLDER_ID"].strip()
+ROOT_FOLDER_ID = os.environ["DRIVE_ROOT_FOLDER_ID"].strip()
+# Bos birakilirsa kok altinda isme gore bulunur
+PUBLISHED_FOLDER_ID = os.environ.get("DRIVE_PUBLISHED_FOLDER_ID", "").strip()
+FAILED_FOLDER_ID = os.environ.get("DRIVE_FAILED_FOLDER_ID", "").strip()
+
+FOLDER_MIME = "application/vnd.google-apps.folder"
+
+# Klasor adi eslesmeleri - hepsi harf duyarsiz
+REELS_NAMES = ("reels", "reel", "videolar")
+# "Capitons" mevcut yazim; "Captions" ileride duzeltilirse de calissin
+CAPTION_NAMES = ("capitons", "captions", "caption", "captionlar")
+# Kok altinda hafta sayilmayacak klasorler
+SKIP_ROOT_NAMES = {"published", "failed", "retry", "archive", "arsiv"}
 
 # Etiketler - Reels'te user_tags sadece username alir, x/y koordinati yok
 USER_TAGS = [
@@ -158,7 +185,7 @@ POLL_INTERVAL = 5                                      # saniye
 POLL_TIMEOUT = _int_env("POLL_TIMEOUT", 480)           # 8 dk
 UPLOAD_TIMEOUT = _int_env("UPLOAD_TIMEOUT", 600)       # 10 dk / deneme
 UPLOAD_ATTEMPTS = _int_env("UPLOAD_ATTEMPTS", 3)
-# En kotu senaryo ~ indirme + 10 dk + 8 dk. Workflow timeout'u 45 dk (bkz reels.yml)
+# En kotu senaryo ~ indirme + 10 dk + 8 dk. Workflow timeout'u 45 dk.
 
 VIDEO_EXTS = (".mp4", ".mov")
 MAX_VIDEO_BYTES = 1024 * 1024 * 1024                   # IG Reels siniri: 1 GB
@@ -168,9 +195,6 @@ CAPTION_MAX_HASHTAGS = 30
 
 TOKEN_WARN_DAYS = 7
 STATE_RETENTION_DAYS = _int_env("STATE_RETENTION_DAYS", 90)
-# 0 = kapali. Acilirsa PUBLISHED'daki eski dosyalar Drive COP KUTUSUNA tasinir
-# (kalici silme yok, 30 gun icinde geri alinabilir).
-PUBLISHED_RETENTION_DAYS = _int_env("PUBLISHED_RETENTION_DAYS", 0)
 
 # Graph API hata kodlari - bunlar dosyanin sucu degil, retry sayacini yakmasinlar
 TRANSIENT_GRAPH_CODES = {
@@ -191,9 +215,11 @@ TRANSIENT_GRAPH_CODES = {
 
 
 def redact(text):
-    """Token'in log'a veya state.json'a sizmasini engeller."""
+    """Sirlarin log'a veya state.json'a sizmasini engeller."""
     text = str(text)
-    for secret in (IG_ACCESS_TOKEN, IG_APP_SECRET):
+    for secret in (IG_ACCESS_TOKEN, IG_APP_SECRET,
+                   os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN", ""),
+                   os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")):
         if secret and len(secret) > 8:
             text = text.replace(secret, "***")
     return text
@@ -255,7 +281,6 @@ def drive_exec(request, context):
 
 def check_token_expiry():
     """Token'in ne zaman olecegini soyler. Calismayi asla durdurmaz."""
-    # App token varsa debug_token'in dogru kullanimi bu
     verifier = (f"{IG_APP_ID}|{IG_APP_SECRET}"
                 if IG_APP_ID and IG_APP_SECRET else IG_ACCESS_TOKEN)
     try:
@@ -294,33 +319,63 @@ def check_token_expiry():
 # --------------------------------------------------------------------------
 
 def drive_client():
-    info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    creds = service_account.Credentials.from_service_account_info(
-        info, scopes=["https://www.googleapis.com/auth/drive"]
-    )
+    """OAuth (kendi hesabiniz) tercih edilir; yoksa service account.
+
+    Service account kisisel My Drive'da dosya olusturamaz (kota 0) ve
+    tasiyamaz (cannotAddParent) - sadece Shared Drive'da is gorur.
+    """
+    if _has_oauth():
+        from google.oauth2.credentials import Credentials
+        creds = Credentials(
+            token=None,
+            refresh_token=os.environ["GOOGLE_OAUTH_REFRESH_TOKEN"].strip(),
+            client_id=os.environ["GOOGLE_OAUTH_CLIENT_ID"].strip(),
+            client_secret=os.environ["GOOGLE_OAUTH_CLIENT_SECRET"].strip(),
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        log("Drive kimligi: OAuth (kullanici hesabi)")
+    else:
+        from google.oauth2 import service_account
+        info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/drive"])
+        log("Drive kimligi: service account "
+            "(My Drive'da tasima/olusturma calismaz)")
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def list_folder(drive, folder_id):
-    """Klasordeki tum dosyalari dondurur (sayfalama dahil)."""
+def list_folder(drive, folder_id, label=""):
+    """Klasordeki tum ogeleri dondurur (sayfalama dahil)."""
     files, page_token = [], None
     while True:
         resp = drive_exec(
             drive.files().list(
                 q=f"'{folder_id}' in parents and trashed = false",
                 fields=("nextPageToken, files(id, name, mimeType, size, "
-                        "createdTime, modifiedTime)"),
+                        "parents, createdTime, modifiedTime)"),
                 pageSize=1000,
                 pageToken=page_token,
                 supportsAllDrives=True,
                 includeItemsFromAllDrives=True,
             ),
-            f"Klasor listelenemedi ({folder_id})",
+            f"Klasor listelenemedi ({label or folder_id})",
         )
         files.extend(resp.get("files", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
             return files
+
+
+def subfolders(entries):
+    return [f for f in entries if f["mimeType"] == FOLDER_MIME]
+
+
+def find_folder(entries, names):
+    for f in subfolders(entries):
+        if f["name"].strip().lower() in names:
+            return f
+    return None
 
 
 def download_file(drive, meta, dest_path):
@@ -347,7 +402,7 @@ def download_file(drive, meta, dest_path):
 
 
 def read_text_file(drive, file_id):
-    """UTF-8 dener, olmazsa cp1254 (Windows Notepad), o da olmazsa kayipli decode."""
+    """UTF-8 dener, olmazsa cp1254 (Windows Notepad), o da olmazsa kayipli."""
     data = drive_exec(
         drive.files().get_media(fileId=file_id, supportsAllDrives=True),
         f"Metin dosyasi okunamadi ({file_id})",
@@ -360,39 +415,39 @@ def read_text_file(drive, file_id):
     return data.decode("utf-8", errors="replace").strip()
 
 
-def move_file(drive, file_id, from_folder, to_folder):
+def move_file(drive, meta, to_folder):
+    """Dosyayi hedef klasore tasir.
+
+    removeParents icin meta['parents'] kullanilir: files.get parent
+    dondurmeyebiliyor (paylasimli erisimde), files.list donduruyor.
+    """
+    parents = meta.get("parents") or []
+    if not parents:
+        raise TransientError(
+            f"{meta['name']}: mevcut klasor belirlenemedi, tasima atlandi")
     drive_exec(
         drive.files().update(
-            fileId=file_id,
+            fileId=meta["id"],
             addParents=to_folder,
-            removeParents=from_folder,
+            removeParents=",".join(parents),
             fields="id, parents",
             supportsAllDrives=True,
         ),
-        f"Dosya tasinamadi ({file_id})",
-    )
-
-
-def trash_file(drive, file_id):
-    """Kalici silmez - Drive cop kutusuna tasir, 30 gun geri alinabilir."""
-    drive_exec(
-        drive.files().update(fileId=file_id, body={"trashed": True},
-                             supportsAllDrives=True),
-        f"Dosya cope tasinamadi ({file_id})",
+        f"Dosya tasinamadi ({meta['name']})",
     )
 
 
 # --------------------------------------------------------------------------
-# Durum dosyasi (Drive'da QUEUE klasoru icinde state.json)
+# Durum dosyasi (kokte state.json)
 # --------------------------------------------------------------------------
 
-def load_state(drive, files):
+def load_state(drive, root_entries):
     """(state_file_id, state, ok) dondurur.
 
     ok=False ise state.json var ama okunamadi. O durumda UZERINE YAZMADAN
     cikmak gerekir - yoksa tum yayin gecmisi ve retry sayaclari silinir.
     """
-    for f in files:
+    for f in root_entries:
         if f["name"] == STATE_FILENAME:
             try:
                 raw = read_text_file(drive, f["id"])
@@ -423,10 +478,11 @@ def save_state(drive, state_file_id, state):
             else:
                 drive_exec(
                     drive.files().create(
-                        body={"name": STATE_FILENAME, "parents": [QUEUE_FOLDER_ID]},
+                        body={"name": STATE_FILENAME, "parents": [ROOT_FOLDER_ID]},
                         media_body=media, fields="id", supportsAllDrives=True,
                     ),
-                    "state.json olusturulamadi",
+                    "state.json olusturulamadi (service account kullaniyorsaniz "
+                    "kotasi 0'dir; OAuth'a gecin veya dosyayi elle olusturun)",
                 )
         finally:
             # Windows'ta acik kalan tanitici unlink'i engelliyor
@@ -444,7 +500,7 @@ def save_state(drive, state_file_id, state):
                 pass
 
 
-def prune_state(state, files):
+def prune_state(state, live_ids):
     """Kuyrukta artik olmayan ve suresi gecmis kayitlari atar.
 
     Kuyrukta HALA duran hicbir kayda dokunmaz - yoksa 'published' isareti
@@ -452,11 +508,10 @@ def prune_state(state, files):
     """
     if STATE_RETENTION_DAYS <= 0:
         return 0
-    in_queue = {f["id"] for f in files}
     cutoff = datetime.now(timezone.utc) - timedelta(days=STATE_RETENTION_DAYS)
     dropped = []
     for file_id, entry in state.items():
-        if file_id in in_queue:
+        if file_id in live_ids:
             continue
         stamp = entry.get("published_at") or entry.get("last_attempt")
         if not stamp:
@@ -496,33 +551,40 @@ def normalize_caption(text):
         log(f"UYARI: {len(tags)} hashtag vardi, son {len(fazla)} tanesi cikarildi "
             f"(IG siniri {CAPTION_MAX_HASHTAGS})")
     if len(text) > CAPTION_MAX_CHARS:
-        text = text[:CAPTION_MAX_CHARS - 1].rstrip() + "…"
+        text = text[:CAPTION_MAX_CHARS - 1].rstrip() + "..."
         log(f"UYARI: caption {CAPTION_MAX_CHARS} karaktere kisaltildi")
     return text
 
 
-def caption_file_for(files, video_name):
+def caption_file_for(candidates, video_name):
     """Ayni isimli .txt'yi HARF DUYARSIZ arar."""
-    stem = os.path.splitext(video_name)[0].lower()
-    for f in files:
-        if f["name"].lower() == f"{stem}.txt":
+    stem = os.path.splitext(video_name)[0].strip().lower()
+    for f in candidates:
+        if f["name"].strip().lower() == f"{stem}.txt":
             return f
     return None
 
 
-def resolve_caption(drive, files, video_name):
+def resolve_caption(drive, job):
+    """Once Capitons/ klasoru, sonra videonun yanindaki .txt, sonra sablon."""
+    video_name = job["video"]["name"]
     stem = os.path.splitext(video_name)[0]
-    txt = caption_file_for(files, video_name)
-    if txt:
+
+    for pool, where in ((job["captions"], "Capitons"),
+                        (job["videos"], "Reels")):
+        txt = caption_file_for(pool, video_name)
+        if not txt:
+            continue
         try:
             text = read_text_file(drive, txt["id"])
         except Exception as e:
-            log(f"UYARI: {txt['name']} okunamadi ({e}), varsayilan sablona dusuluyor")
-            text = ""
+            log(f"UYARI: {txt['name']} okunamadi ({e}), sonraki kaynaga geciliyor")
+            continue
         if text:
-            log(f"Caption kaynagi: {txt['name']}")
-            return normalize_caption(text), txt["id"]
-        log(f"UYARI: {txt['name']} bos, varsayilan sablona dusuluyor")
+            log(f"Caption kaynagi: {where}/{txt['name']}")
+            return normalize_caption(text), txt
+        log(f"UYARI: {txt['name']} bos")
+
     log("Caption kaynagi: varsayilan sablon")
     return normalize_caption(render_default_caption(stem)), None
 
@@ -591,11 +653,7 @@ def upload_offset(container_id):
 
 
 def upload_video(container_id, path):
-    """Video byte'larini rupload'a yukler; kopan yuklemeyi kaldigi yerden surdurur.
-
-    Onceki surum upload_type=resumable ile session aciyor ama tek seferde
-    offset=0'dan yukluyordu - 180. MB'ta kopan bir yukleme bastan basliyordu.
-    """
+    """Video byte'larini rupload'a yukler; kopan yuklemeyi kaldigi yerden surdurur."""
     size = os.path.getsize(path)
     if size > MAX_VIDEO_BYTES:
         raise FileError(f"Video {size / 1024 / 1024:.0f} MB - IG siniri 1024 MB")
@@ -726,102 +784,139 @@ def find_recent_media(caption, minutes=60):
 
 
 # --------------------------------------------------------------------------
-# Ana akis
+# Kuyruk - hafta klasorleri
 # --------------------------------------------------------------------------
 
 def natural_key(name):
-    """'10.mp4' > '2.mp4' olsun diye - duz sort bunun tersini yapar."""
+    """'10. Hafta' > '2. Hafta' olsun diye - duz sort bunun tersini yapar."""
     return [int(p) if p.isdigit() else p.lower()
             for p in re.split(r"(\d+)", name)]
 
 
-def pick_next(files, state):
-    """Dogal siralamada, MAX_RETRIES'i asmamis ilk video."""
-    videos = [
-        f for f in files
-        if f["name"].lower().endswith(VIDEO_EXTS)
-        and not state.get(f["id"], {}).get("published")
-        and state.get(f["id"], {}).get("retries", 0) < MAX_RETRIES
-    ]
-    videos.sort(key=lambda f: natural_key(f["name"]))
-    return videos[0] if videos else None
+def discover_root(drive):
+    """Kok klasoru cozer: published/, failed/ ve hafta klasorleri."""
+    entries = list_folder(drive, ROOT_FOLDER_ID, "kok klasor")
+    folders = subfolders(entries)
+
+    published = PUBLISHED_FOLDER_ID or (find_folder(entries, {"published"}) or {}).get("id")
+    failed = FAILED_FOLDER_ID or (find_folder(entries, {"failed"}) or {}).get("id")
+
+    eksik = [n for n, v in (("published", published), ("failed", failed)) if not v]
+    if eksik:
+        sys.exit(
+            f"HATA - kok klasorde su alt klasorler bulunamadi: {', '.join(eksik)}\n"
+            f"  Drive'da kok klasorun ({ROOT_FOLDER_ID}) altinda 'published' ve "
+            f"'failed' adinda birer klasor olusturun, ya da\n"
+            f"  DRIVE_PUBLISHED_FOLDER_ID / DRIVE_FAILED_FOLDER_ID degiskenleriyle "
+            f"ID'lerini verin."
+        )
+
+    weeks = [f for f in folders
+             if f["name"].strip().lower() not in SKIP_ROOT_NAMES
+             and f["id"] not in (published, failed)]
+    weeks.sort(key=lambda f: natural_key(f["name"]))
+    return entries, published, failed, weeks
 
 
-def sweep_exhausted(drive, files, state):
-    """MAX_RETRIES'i asmis dosyalari (ve caption'larini) FAILED'a tasi."""
-    for f in files:
-        entry = state.get(f["id"], {})
-        if entry.get("retries", 0) < MAX_RETRIES or entry.get("moved_to_failed"):
+def week_contents(drive, week):
+    """(reels_klasoru, videolar, caption_dosyalari) dondurur."""
+    subs = list_folder(drive, week["id"], week["name"])
+    reels = find_folder(subs, REELS_NAMES)
+    caps = find_folder(subs, CAPTION_NAMES)
+
+    if reels:
+        videos = list_folder(drive, reels["id"], f"{week['name']}/{reels['name']}")
+    else:
+        # Reels/ alt klasoru yoksa videolar dogrudan hafta klasorunde olabilir
+        videos = [f for f in subs if f["mimeType"] != FOLDER_MIME]
+        reels = week if any(v["name"].lower().endswith(VIDEO_EXTS)
+                            for v in videos) else None
+
+    captions = (list_folder(drive, caps["id"], f"{week['name']}/{caps['name']}")
+                if caps else [])
+    return reels, videos, captions
+
+
+def eligible(video, state):
+    entry = state.get(video["id"], {})
+    return (video["name"].lower().endswith(VIDEO_EXTS)
+            and not entry.get("published")
+            and entry.get("retries", 0) < MAX_RETRIES)
+
+
+def pick_job(drive, weeks, state):
+    """Hafta sirasiyla ilk uygun videoyu bulur; kuyruktaki tum id'leri de toplar."""
+    job, seen_ids = None, set()
+    for week in weeks:
+        reels, videos, captions = week_contents(drive, week)
+        seen_ids.update(v["id"] for v in videos)
+        if reels is None:
+            log(f"UYARI: {week['name']} icinde Reels klasoru veya video yok, atlandi")
             continue
-        try:
-            move_file(drive, f["id"], QUEUE_FOLDER_ID, FAILED_FOLDER_ID)
-            entry["moved_to_failed"] = True
-            state[f["id"]] = entry
-            log(f"FAILED'a tasindi: {f['name']}")
-        except Exception as e:
-            log(f"FAILED tasima hatasi ({f['name']}): {e}")
-            continue
+        if job is None:
+            adaylar = sorted((v for v in videos if eligible(v, state)),
+                             key=lambda f: natural_key(f["name"]))
+            if adaylar:
+                job = {"week": week, "reels": reels, "video": adaylar[0],
+                       "videos": videos, "captions": captions}
+    return job, seen_ids
 
-        # Caption dosyasi kuyrukta oksuz kalmasin
-        txt = caption_file_for(files, f["name"])
-        if txt:
+
+def sweep_exhausted(drive, weeks, state, failed_folder):
+    """MAX_RETRIES'i asmis videolari failed/ klasorune tasir - kuyruk tikanmasin.
+
+    Caption'lar YERINDE KALIR: Capitons/ bir kutuphane, sadece video hareket eder.
+    """
+    for week in weeks:
+        reels, videos, _ = week_contents(drive, week)
+        if reels is None:
+            continue
+        for v in videos:
+            entry = state.get(v["id"], {})
+            if entry.get("retries", 0) < MAX_RETRIES or entry.get("moved_to_failed"):
+                continue
             try:
-                move_file(drive, txt["id"], QUEUE_FOLDER_ID, FAILED_FOLDER_ID)
-                log(f"FAILED'a tasindi: {txt['name']}")
+                move_file(drive, v, failed_folder)
+                entry["moved_to_failed"] = True
+                state[v["id"]] = entry
+                log(f"failed/ klasorune tasindi: {week['name']}/{v['name']}")
             except Exception as e:
-                log(f"Caption tasima hatasi ({txt['name']}): {e}")
+                log(f"failed/ tasima hatasi ({v['name']}): {e}")
 
 
-def cleanup_published(drive):
-    """PUBLISHED klasorunu sinirsiz buyumekten korur. Varsayilan: kapali."""
-    if PUBLISHED_RETENTION_DAYS <= 0:
-        return
-    cutoff = datetime.now(timezone.utc) - timedelta(days=PUBLISHED_RETENTION_DAYS)
-    moved = 0
-    try:
-        for f in list_folder(drive, PUBLISHED_FOLDER_ID):
-            stamp = f.get("createdTime") or f.get("modifiedTime") or ""
-            when = None
-            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
-                try:
-                    when = datetime.strptime(stamp, fmt).replace(tzinfo=timezone.utc)
-                    break
-                except ValueError:
-                    continue
-            if when and when < cutoff:
-                trash_file(drive, f["id"])
-                moved += 1
-    except Exception as e:
-        log(f"PUBLISHED temizligi atlandi: {e}")
-        return
-    if moved:
-        log(f"PUBLISHED temizligi: {moved} dosya cop kutusuna tasindi "
-            f"({PUBLISHED_RETENTION_DAYS} gunden eski)")
+# --------------------------------------------------------------------------
+# Ana akis
+# --------------------------------------------------------------------------
 
-
-def run_dry(drive, files, state):
+def run_dry(drive, weeks, state):
     """Instagram'a hicbir sey gondermeden tum zinciri dogrular."""
     log("DRY RUN - Instagram'a istek gonderilmeyecek, state yazilmayacak")
-    video = pick_next(files, state)
-    if not video:
+    log(f"Hafta sirasi: {', '.join(w['name'] for w in weeks) or '(yok)'}")
+
+    job, _ = pick_job(drive, weeks, state)
+    if not job:
         log("Kuyrukta yayinlanacak video yok")
         return 0
 
-    caption, caption_file_id = resolve_caption(drive, files, video["name"])
-    size = int(video.get("size") or 0)
-    log(f"Secilecek video : {video['name']}")
+    caption, caption_file = resolve_caption(drive, job)
+    size = int(job["video"].get("size") or 0)
+    bekleyen = sum(1 for v in job["videos"] if eligible(v, state))
+
+    log(f"Hafta           : {job['week']['name']}")
+    log(f"Secilecek video : {job['video']['name']}")
     log(f"Boyut           : {size / 1024 / 1024:.1f} MB "
         f"({'SINIR ASILDI' if size > MAX_VIDEO_BYTES else 'uygun'})")
-    log(f"Caption dosyasi : {'var' if caption_file_id else 'yok (sablon)'}")
+    log(f"Caption dosyasi : {caption_file['name'] if caption_file else 'yok (sablon)'}")
     log(f"Etiketler       : {', '.join(USER_TAGS) if USER_TAGS else 'yok'}")
+    log(f"Bu haftada sira : {bekleyen} video bekliyor")
     log("--- caption ---")
     print(caption, flush=True)
     log("--- caption sonu ---")
 
-    tmp_path = os.path.join(tempfile.gettempdir(), f"dryrun_{video['name']}")
+    tmp_path = os.path.join(tempfile.gettempdir(), f"dryrun_{job['video']['name']}")
     try:
         log("Indirme dogrulaniyor...")
-        actual = download_file(drive, video, tmp_path)
+        actual = download_file(drive, job["video"], tmp_path)
         log(f"Indirme tamam: {actual} bayt - Drive erisimi ve butunluk OK")
     finally:
         if os.path.exists(tmp_path):
@@ -847,8 +942,8 @@ def main():
     check_token_expiry()
 
     drive = drive_client()
-    files = list_folder(drive, QUEUE_FOLDER_ID)
-    state_file_id, state, state_ok = load_state(drive, files)
+    root_entries, published_folder, failed_folder, weeks = discover_root(drive)
+    state_file_id, state, state_ok = load_state(drive, root_entries)
 
     if not state_ok:
         log("!!! state.json var ama okunamadi. Uzerine yazip gecmisi silmemek "
@@ -856,21 +951,22 @@ def main():
         return 1
 
     if DRY_RUN:
-        return run_dry(drive, files, state)
+        return run_dry(drive, weeks, state)
 
-    sweep_exhausted(drive, files, state)
-    prune_state(state, files)
-    cleanup_published(drive)
+    sweep_exhausted(drive, weeks, state, failed_folder)
 
-    video = pick_next(files, state)
-    if not video:
+    job, live_ids = pick_job(drive, weeks, state)
+    prune_state(state, live_ids)
+
+    if not job:
         log("Kuyrukta yayinlanacak video yok")
-        save_state(drive, state_file_id, state)
+        _safe_save(drive, state_file_id, state)
         return 0
 
-    log(f"Secilen: {video['name']}")
+    video = job["video"]
+    log(f"Secilen: {job['week']['name']}/{video['name']}")
     entry = state.setdefault(video["id"], {"retries": 0})
-    caption, caption_file_id = resolve_caption(drive, files, video["name"])
+    caption, _caption_file = resolve_caption(drive, job)
 
     # Indirmeden once boyut kontrolu - bosuna 20 dakika harcamayalim
     declared = int(video.get("size") or 0)
@@ -881,7 +977,7 @@ def main():
         entry["last_attempt"] = datetime.now(timezone.utc).isoformat()
         state[video["id"]] = entry
         _safe_save(drive, state_file_id, state)
-        log(f"HATA: {entry['last_error']} - sonraki calismada FAILED'a tasinacak")
+        log(f"HATA: {entry['last_error']} - sonraki calismada failed/ klasorune")
         return 1
 
     tmp_path = os.path.join(tempfile.gettempdir(), video["name"])
@@ -916,7 +1012,7 @@ def main():
             entry["last_attempt"] = datetime.now(timezone.utc).isoformat()
 
             # FileError disindaki her sey gecici sayilir: token, kota, ag, izin.
-            # Bunlarda sayaci artirmak saglam videolari FAILED'a surer.
+            # Bunlarda sayaci artirmak saglam videolari failed/ klasorune surer.
             if isinstance(e, FileError):
                 entry["retries"] = entry.get("retries", 0) + 1
                 entry["last_error_kind"] = "file"
@@ -924,7 +1020,7 @@ def main():
                 _safe_save(drive, state_file_id, state)
                 log(f"DOSYA HATASI (deneme {entry['retries']}/{MAX_RETRIES}): {e}")
                 if entry["retries"] >= MAX_RETRIES:
-                    log("Deneme hakki bitti - sonraki calismada FAILED'a tasinacak")
+                    log("Deneme hakki bitti - sonraki calismada failed/ klasorune")
             else:
                 entry["last_error_kind"] = "transient"
                 state[video["id"]] = entry
@@ -947,17 +1043,18 @@ def main():
     entry.update({
         "published": True,
         "media_id": media_id,
+        "week": job["week"]["name"],
+        "name": video["name"],
         "published_at": datetime.now(timezone.utc).isoformat(),
     })
     state[video["id"]] = entry
     save_state(drive, state_file_id, state)
 
-    # Tasima hatasi yayini gecersiz kilmaz - job'u FAIL ETME, sadece uyar
+    # Tasima hatasi yayini gecersiz kilmaz - job'u FAIL ETME, sadece uyar.
+    # Caption dosyasi yerinde birakilir (Capitons/ bir kutuphane).
     try:
-        move_file(drive, video["id"], QUEUE_FOLDER_ID, PUBLISHED_FOLDER_ID)
-        if caption_file_id:
-            move_file(drive, caption_file_id, QUEUE_FOLDER_ID, PUBLISHED_FOLDER_ID)
-        log("PUBLISHED klasorune tasindi")
+        move_file(drive, video, published_folder)
+        log("published/ klasorune tasindi")
     except Exception as e:
         log(f"UYARI: reel yayinlandi ama dosya tasinamadi ({e}). "
             f"Drive'da elle tasiyin. Tekrar paylasilmaz (state'te isaretli).")

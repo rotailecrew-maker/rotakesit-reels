@@ -44,14 +44,13 @@ jobs:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           IG_APP_ID: ${{ secrets.IG_APP_ID }}
           IG_APP_SECRET: ${{ secrets.IG_APP_SECRET }}
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_QUEUE_FOLDER_ID: ${{ secrets.DRIVE_QUEUE_FOLDER_ID }}
-          DRIVE_PUBLISHED_FOLDER_ID: ${{ secrets.DRIVE_PUBLISHED_FOLDER_ID }}
-          DRIVE_FAILED_FOLDER_ID: ${{ secrets.DRIVE_FAILED_FOLDER_ID }}
-          # Opsiyonel ayarlar — repo Variables'tan (secret degil) gelir
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+          DRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_ROOT_FOLDER_ID }}
+          # Opsiyonel ayarlar - repo Variables'tan (secret degil) gelir
           USER_TAGS: ${{ vars.USER_TAGS }}
           GRAPH_VERSION: ${{ vars.GRAPH_VERSION }}
-          PUBLISHED_RETENTION_DAYS: ${{ vars.PUBLISHED_RETENTION_DAYS }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
         run: python post_reel.py
 
