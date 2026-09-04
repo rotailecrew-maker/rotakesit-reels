@@ -54,6 +54,7 @@ jobs:
           # Opsiyonel ayarlar - repo Variables'tan (secret degil) gelir
           USER_TAGS: ${{ vars.USER_TAGS }}
           GRAPH_VERSION: ${{ vars.GRAPH_VERSION }}
+          MIN_INTERVAL_HOURS: ${{ vars.MIN_INTERVAL_HOURS }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
         run: python post_reel.py
 

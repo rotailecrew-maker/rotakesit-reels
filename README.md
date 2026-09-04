@@ -200,6 +200,11 @@ python refresh_token.py --check
   tamamen atlayabilir. Saat başı (`:00`) en kötü an — bu yüzden cron `:17`'ye
   alındı. Dakikası önemliyse harici tetikleyici (cron-job.org →
   `workflow_dispatch`) kullanın; `workflow_dispatch` kuyruğa girmez.
+- **Üst üste tetikleyiciler.** Harici tetikleyici + cron birlikte kullanılırsa
+  ikisi *farklı* videolar paylaşır ve günlük sayı ikiye katlanır — `state.json`
+  bunu engellemez, o sadece aynı videonun tekrarını engeller. `MIN_INTERVAL_HOURS`
+  (varsayılan 6) bunun için var: son paylaşımdan bu yana bu süre geçmediyse
+  çalışma sessizce biter. Yedekli tetikleme bu sayede güvenli.
 - **60 gün kuralı.** GitHub, commit almayan repolarda cron'u kapatır.
   `keepalive.yml` haftalık boş commit atarak önler — silmeyin.
 - **OAuth consent "Testing" modu** refresh token'ı 7 günde öldürür.

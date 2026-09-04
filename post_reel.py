@@ -204,6 +204,13 @@ CAPTION_MAX_CHARS = 2200
 CAPTION_MAX_HASHTAGS = 30
 
 TOKEN_WARN_DAYS = 7
+
+# Ust uste tetikleyicilere karsi koruma. Harici tetikleyici 18:00'de,
+# cron 18:17'de calisirsa ikisi FARKLI videolar paylasir - state.json bunu
+# engellemez, o sadece AYNI videonun tekrarini engeller. Bu esik, son
+# paylasimdan bu yana yeterli sure gecmediyse calismayi sessizce bitirir.
+# 0 = kapali. Gunde 2 paylasim icin 6 saat guvenli (aralar 9 ve 15 saat).
+MIN_INTERVAL_HOURS = _int_env("MIN_INTERVAL_HOURS", 6)
 STATE_RETENTION_DAYS = _int_env("STATE_RETENTION_DAYS", 90)
 
 # Graph API hata kodlari - bunlar dosyanin sucu degil, retry sayacini yakmasinlar
@@ -508,6 +515,23 @@ def save_state(drive, state_file_id, state):
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def last_published_at(state):
+    """state.json'daki en son basarili paylasim zamani. Yoksa None."""
+    stamps = []
+    for entry in state.values():
+        raw = entry.get("published_at")
+        if not raw:
+            continue
+        try:
+            when = datetime.fromisoformat(raw)
+        except (ValueError, TypeError):
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        stamps.append(when)
+    return max(stamps) if stamps else None
 
 
 def prune_state(state, live_ids):
@@ -962,6 +986,19 @@ def main():
 
     if DRY_RUN:
         return run_dry(drive, weeks, state)
+
+    if MIN_INTERVAL_HOURS > 0:
+        last = last_published_at(state)
+        if last:
+            elapsed = datetime.now(timezone.utc) - last
+            if elapsed < timedelta(hours=MIN_INTERVAL_HOURS):
+                kalan = timedelta(hours=MIN_INTERVAL_HOURS) - elapsed
+                log(f"Son paylasim {elapsed.total_seconds() / 3600:.1f} saat once "
+                    f"yapilmis. {MIN_INTERVAL_HOURS} saatlik aralik dolmadan yeni "
+                    f"paylasim yapilmaz ({kalan.total_seconds() / 3600:.1f} saat kaldi).")
+                log("Bu, ust uste tetikleyicilerin gunluk paylasim sayisini "
+                    "ikiye katlamasini onler. MIN_INTERVAL_HOURS ile ayarlanir.")
+                return 0
 
     sweep_exhausted(drive, weeks, state, failed_folder)
 
