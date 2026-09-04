@@ -5,6 +5,9 @@
 *.pem
 *service-account*.json
 credentials.json
+rotakesit-reels-*.json
+*.iam.gserviceaccount.com.json
+gcp-*.json
 
 # Python
 venv/
