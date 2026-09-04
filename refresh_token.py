@@ -42,7 +42,8 @@ GH_TOKEN = os.environ.get("GH_TOKEN", "").strip()
 GH_REPOSITORY = os.environ.get("GH_REPOSITORY", "").strip()
 SECRET_NAME = os.environ.get("TOKEN_SECRET_NAME", "IG_ACCESS_TOKEN").strip()
 
-REFRESH_BEFORE_DAYS = int(os.environ.get("REFRESH_BEFORE_DAYS", "15") or 15)
+# Bos deger de varsayilana dusmeli - GitHub tanimsiz variable'i bos string yapar
+REFRESH_BEFORE_DAYS = int(os.environ.get("REFRESH_BEFORE_DAYS", "").strip() or 15)
 
 
 def log(msg):

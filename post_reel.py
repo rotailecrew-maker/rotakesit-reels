@@ -80,6 +80,16 @@ OAUTH_ENV = ("GOOGLE_OAUTH_CLIENT_ID",
              "GOOGLE_OAUTH_REFRESH_TOKEN")
 
 
+def _str_env(name, default):
+    """Bos degeri 'tanimsiz' sayar.
+
+    GitHub'da tanimsiz bir secret/variable bos string olur ve
+    os.environ.get(name, default) varsayilani DONDURMEZ - boslugu dondurur.
+    USER_TAGS bu yuzden sessizce devre disi kalmisti.
+    """
+    return os.environ.get(name, "").strip() or default
+
+
 def _bool_env(name, default=False):
     raw = os.environ.get(name, "").strip().lower()
     if not raw:
@@ -140,7 +150,7 @@ _validate_env()
 
 DRY_RUN = _bool_env("DRY_RUN")
 
-GRAPH_VERSION = os.environ.get("GRAPH_VERSION", "").strip() or "v23.0"
+GRAPH_VERSION = _str_env("GRAPH_VERSION", "v23.0")
 GRAPH_HOST = f"https://graph.facebook.com/{GRAPH_VERSION}"
 RUPLOAD_HOST = f"https://rupload.facebook.com/ig-api-upload/{GRAPH_VERSION}"
 
@@ -168,12 +178,12 @@ SKIP_ROOT_NAMES = {"published", "failed", "retry", "archive", "arsiv"}
 # Etiketler - Reels'te user_tags sadece username alir, x/y koordinati yok
 USER_TAGS = [
     u.strip().lstrip("@")
-    for u in os.environ.get("USER_TAGS", "rota,rotaile,ramedyaresmi").split(",")
+    for u in _str_env("USER_TAGS", "rota,rotaile,ramedyaresmi").split(",")
     if u.strip()
 ]
 
 # .txt bulunamazsa kullanilacak sablon. {name} = uzantisiz dosya adi
-DEFAULT_CAPTION = os.environ.get(
+DEFAULT_CAPTION = _str_env(
     "DEFAULT_CAPTION",
     "{name}\n\n@rota @rotaile @ramedyaresmi\n\n#rotakesit #kesit #video",
 )
