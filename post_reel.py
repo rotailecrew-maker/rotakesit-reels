@@ -212,7 +212,20 @@ TOKEN_WARN_DAYS = 7
 # engellemez, o sadece AYNI videonun tekrarini engeller. Bu esik, son
 # paylasimdan bu yana yeterli sure gecmediyse calismayi sessizce bitirir.
 # 0 = kapali. Gunde 2 paylasim icin 6 saat guvenli (aralar 9 ve 15 saat).
-MIN_INTERVAL_HOURS = _int_env("MIN_INTERVAL_HOURS", 6)
+MIN_INTERVAL_HOURS = _int_env("MIN_INTERVAL_HOURS", 4)
+
+# GitHub cron zamanlanmis calismalari rastgele dusuruyor - bu repoda 2/2
+# kacirdi. Cozum: saat basi denemek ve pencere disinda hicbir sey yapmamak.
+# Sabah 09-12, aksam 18-21 (TR). Her pencerede 4 deneme sansi var; biri
+# tutarsa o pencere icin is bitmis olur.
+TZ_OFFSET_HOURS = _int_env("TZ_OFFSET_HOURS", 3)   # Turkiye UTC+3, DST yok
+POST_WINDOWS = _str_env("POST_WINDOWS", "9-12,18-21")
+
+# Pencere kurali SADECE zamanlanmis calismalarda gecerli; elle tetiklemede
+# kullanici ne zaman isterse paylasabilmeli.
+ENFORCE_WINDOW = _bool_env(
+    "ENFORCE_WINDOW",
+    os.environ.get("GITHUB_EVENT_NAME", "") == "schedule")
 STATE_RETENTION_DAYS = _int_env("STATE_RETENTION_DAYS", 90)
 
 # Graph API hata kodlari - bunlar dosyanin sucu degil, retry sayacini yakmasinlar
@@ -517,6 +530,60 @@ def save_state(drive, state_file_id, state):
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def local_now():
+    """Yerel (TR) saat, naive. zoneinfo runner'da hep bulunmayabiliyor."""
+    return (datetime.now(timezone.utc)
+            + timedelta(hours=TZ_OFFSET_HOURS)).replace(tzinfo=None)
+
+
+def to_local(when):
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (when.astimezone(timezone.utc)
+            + timedelta(hours=TZ_OFFSET_HOURS)).replace(tzinfo=None)
+
+
+def parse_windows(spec):
+    """"9-12,18-21" -> [(9, 12), (18, 21)]"""
+    out = []
+    for parca in spec.split(","):
+        parca = parca.strip()
+        if not parca:
+            continue
+        try:
+            if "-" in parca:
+                a, b = parca.split("-", 1)
+                out.append((int(a), int(b)))
+            else:
+                out.append((int(parca), int(parca)))
+        except ValueError:
+            log(f"UYARI: POST_WINDOWS icinde cozulemeyen parca: {parca!r}")
+    return out
+
+
+def current_window(now_local, windows):
+    for lo, hi in windows:
+        if lo <= now_local.hour <= hi:
+            return (lo, hi)
+    return None
+
+
+def posted_in_window(state, now_local, window):
+    """Bu pencerede bugun zaten paylasim yapildi mi?"""
+    lo, hi = window
+    for entry in state.values():
+        raw = entry.get("published_at")
+        if not raw:
+            continue
+        try:
+            when = to_local(datetime.fromisoformat(raw))
+        except (ValueError, TypeError):
+            continue
+        if when.date() == now_local.date() and lo <= when.hour <= hi:
+            return True
+    return False
 
 
 def last_published_at(state):
@@ -976,6 +1043,20 @@ def _safe_save(drive, state_file_id, state):
 
 def main():
     log(f"rotakesit reels - {'DRY RUN' if DRY_RUN else 'canli mod'}")
+
+    # Pencere kontrolu EN BASTA: saat basi calisiyoruz, gunun 16 saatinde
+    # hicbir sey yapmadan cikmaliyiz - Drive/IG cagrisi bile yapmadan.
+    pencere = None
+    if ENFORCE_WINDOW and not DRY_RUN:
+        simdi = local_now()
+        pencereler = parse_windows(POST_WINDOWS)
+        pencere = current_window(simdi, pencereler)
+        if not pencere:
+            log(f"Saat {simdi:%H:%M} (TR) paylasim penceresi disinda "
+                f"({POST_WINDOWS}). Bir sey yapilmadi.")
+            return 0
+        log(f"Paylasim penceresi: {pencere[0]:02d}-{pencere[1]:02d} TR, "
+            f"su an {simdi:%H:%M}")
     check_token_expiry()
 
     drive = drive_client()
@@ -989,6 +1070,11 @@ def main():
 
     if DRY_RUN:
         return run_dry(drive, weeks, state)
+
+    if pencere and posted_in_window(state, local_now(), pencere):
+        log(f"Bu pencerede ({pencere[0]:02d}-{pencere[1]:02d} TR) bugun zaten "
+            f"paylasim yapilmis. Bir sey yapilmadi.")
+        return 0
 
     if MIN_INTERVAL_HOURS > 0:
         last = last_published_at(state)

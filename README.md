@@ -29,7 +29,7 @@ sadece videolar hareket eder.
 | `setup_oauth.py` | Bir kerelik Drive yetkilendirmesi |
 | `refresh_token.py` | IG token'ının 60 günde ölmesini engeller |
 | `check_credentials.py` | Haftalık ömür denetimi — sessiz ölümü önler |
-| `.github/workflows/reels.yml` | Günde 2 paylaşım (09:17 / 18:17 TR) |
+| `.github/workflows/reels.yml` | Saat başı denenir, pencere içinde paylaşır (09-12 / 18-21 TR) |
 | `.github/workflows/keepalive.yml` | Haftalık: token yenileme + repo'yu canlı tutma |
 
 ---
@@ -239,10 +239,15 @@ python check_credentials.py             # eşik altındaysa exit 1
 
 ## Bilinen sınırlar
 
-- **Cron kayması.** GitHub zamanlanmış çalışmaları geciktirir, yoğun saatlerde
-  tamamen atlayabilir. Saat başı (`:00`) en kötü an — bu yüzden cron `:17`'ye
-  alındı. Dakikası önemliyse harici tetikleyici (cron-job.org →
-  `workflow_dispatch`) kullanın; `workflow_dispatch` kuyruğa girmez.
+- **GitHub cron güvenilmez — buna göre tasarlandı.** GitHub zamanlanmış
+  çalışmaları rastgele düşürüyor; bu repoda ilk iki deneme (`:00` ve `:17`)
+  hiç tetiklenmedi (API'de `event=schedule` toplam 0). Bu yüzden cron **saat
+  başı** çalışır ve paylaşımı `POST_WINDOWS` (varsayılan `9-12,18-21` TR)
+  belirler. Her pencerede 4 tetiklenme şansı olur, biri tutunca pencere
+  kapanır. Pencere dışı çalışmalar Drive/IG'ye hiç dokunmadan ~5 saniyede
+  biter; genel repolarda Actions dakikaları ücretsiz.
+  Dakikası kritikse harici tetikleyici (cron-job.org → `workflow_dispatch`)
+  ekleyebilirsiniz; `MIN_INTERVAL_HOURS` çakışmayı engeller.
 - **Üst üste tetikleyiciler.** Harici tetikleyici + cron birlikte kullanılırsa
   ikisi *farklı* videolar paylaşır ve günlük sayı ikiye katlanır — `state.json`
   bunu engellemez, o sadece aynı videonun tekrarını engeller. `MIN_INTERVAL_HOURS`

@@ -2,14 +2,19 @@ name: rotakesit reels
 
 on:
   schedule:
-    # GitHub Actions cron UTC calisir. Turkiye = UTC+3 (yil boyu sabit).
+    # SAAT BASI calisir - gunde 2 kez DEGIL.
     #
-    # Dakika :00 DEGIL :17 - saat basi platformun en yogun ani ve GitHub
-    # o yukte zamanlanmis calismalari geciktiriyor, bazen tamamen atliyor.
-    # 4 Eylul 2026'da "0 15" ile calisma hic tetiklenmedi, bu yuzden kaydirildi.
-    # Dakikasi kritikse harici tetikleyici sart (bkz README > Bilinen sinirlar).
-    - cron: "17 6 * * *"    # 09:17 TR
-    - cron: "17 15 * * *"   # 18:17 TR
+    # Sebep: GitHub zamanlanmis calismalari rastgele dusuruyor. Bu repoda
+    # 4-5 Eylul 2026'da 2/2 kacirildi (API: event=schedule toplam 0 calisma),
+    # konfigurasyon kusursuz oldugu halde. Gunde 2 deneme yerine 24 deneme
+    # yapip pencere disindakileri aninda sonlandirmak bu guvenilmezligi
+    # telafi eder.
+    #
+    # Paylasim penceresi post_reel.py icindeki POST_WINDOWS ile belirlenir
+    # (varsayilan 09-12 ve 18-21 TR). Her pencerede 4 tetiklenme sansi var;
+    # biri tutunca o pencere kapanir. Pencere disi calismalar Drive/IG'ye
+    # hic dokunmadan ~5 saniyede biter.
+    - cron: "17 * * * *"
   workflow_dispatch:        # elle tetikleme
     inputs:
       dry_run:
