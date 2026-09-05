@@ -28,6 +28,7 @@ sadece videolar hareket eder.
 | `post_reel.py` | Ana akış — kuyruktan bir video alır, paylaşır, taşır |
 | `setup_oauth.py` | Bir kerelik Drive yetkilendirmesi |
 | `refresh_token.py` | IG token'ının 60 günde ölmesini engeller |
+| `check_credentials.py` | Haftalık ömür denetimi — sessiz ölümü önler |
 | `.github/workflows/reels.yml` | Günde 2 paylaşım (09:17 / 18:17 TR) |
 | `.github/workflows/keepalive.yml` | Haftalık: token yenileme + repo'yu canlı tutma |
 
@@ -199,6 +200,41 @@ IG long-lived token'ı **60 günde** ölür. `keepalive.yml` her pazartesi
 python refresh_token.py --check
 ```
 
+---
+
+## Kimlik bilgileri ve ömürleri
+
+Bu otomasyonun bütün sessiz ölüm sebepleri burada. `check_credentials.py`
+haftalık çalışır (`keepalive.yml`); eşiğe yaklaşan bir şey varsa iş **başarısız
+olur**, böylece GitHub maili ve `NOTIFY_WEBHOOK` bildirimi tetiklenir.
+
+| Kimlik | Ömür | Yenileme |
+|---|---|---|
+| `IG_ACCESS_TOKEN` (`expires_at`) | 60 gün | ✅ otomatik — `refresh_token.py` |
+| `IG_ACCESS_TOKEN` (`data_access_expires_at`) | **90 gün** | ❌ **elle** — aşağıya bakın |
+| `GOOGLE_OAUTH_REFRESH_TOKEN` | süresiz\* | — |
+| `GH_TOKEN` (PAT) | seçtiğiniz süre | ❌ elle |
+| `IG_APP_SECRET`, `GOOGLE_OAUTH_CLIENT_SECRET` | süresiz | — |
+
+\* **Yalnızca** OAuth consent screen **In production** ise. `Testing` modunda
+kalırsa refresh token verilişinden **7 gün** sonra ölür. Kontrol:
+[console.cloud.google.com/auth/audience](https://console.cloud.google.com/auth/audience)
+
+### 90 günlük Instagram adımı (kaçınılmaz)
+
+`data_access_expires_at`, Facebook'un ayrı bir sayacıdır ve **token yenilemeyle
+uzamaz** — ölçüldü: `fb_exchange_token` sonrası tarih aynı kalıyor. Yalnızca
+Facebook giriş ekranından yeniden yetki verilince sıfırlanır.
+App Review'dan geçmemiş uygulamalar için bu 90 günlük sınır kaldırılamıyor.
+
+90 günde bir yapılacak: [Graph API Explorer](https://developers.facebook.com/tools/explorer/)
+→ uygulamayı seçin → **Generate Access Token** → izinleri onaylayın → çıkan token'ı
+`IG_ACCESS_TOKEN` secret'ına yazın. `check_credentials.py` 10 gün kala uyarır.
+
+```bash
+python check_credentials.py --report    # her zaman rapor, exit 0
+python check_credentials.py             # eşik altındaysa exit 1
+```
 ---
 
 ## Bilinen sınırlar

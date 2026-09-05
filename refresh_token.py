@@ -24,6 +24,7 @@ Opsiyonel (secret'i otomatik guncellemek icin):
 """
 
 import base64
+import io
 import json
 import os
 import sys
@@ -143,6 +144,26 @@ def update_github_secret(value):
     return True
 
 
+def sync_local_env(value):
+    """Yerelde .env varsa onu da gunceller.
+
+    Aksi halde GitHub secret yenilenirken yerel .env eski token'da kalir
+    ve yerel testler CI'dan farkli davranir.
+    """
+    if not os.path.exists(".env"):
+        return
+    with io.open(".env", encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith("IG_ACCESS_TOKEN="):
+            lines[i] = "IG_ACCESS_TOKEN=" + value
+            with io.open(".env", "w", encoding="utf-8",
+                         newline="\n") as fh:
+                fh.write("\n".join(lines) + "\n")
+            log("Yerel .env de guncellendi")
+            return
+
+
 def main():
     require("IG_APP_ID", "IG_APP_SECRET", "IG_ACCESS_TOKEN")
 
@@ -172,6 +193,8 @@ def main():
     log("Yeni long-lived token aliniyor...")
     new_token = exchange()
     log(f"Yeni token alindi (uzunluk {len(new_token)}, icerigi loglanmaz)")
+
+    sync_local_env(new_token)
 
     if update_github_secret(new_token):
         return 0
