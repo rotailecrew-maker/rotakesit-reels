@@ -212,14 +212,22 @@ TOKEN_WARN_DAYS = 7
 # engellemez, o sadece AYNI videonun tekrarini engeller. Bu esik, son
 # paylasimdan bu yana yeterli sure gecmediyse calismayi sessizce bitirir.
 # 0 = kapali. Gunde 2 paylasim icin 6 saat guvenli (aralar 9 ve 15 saat).
-MIN_INTERVAL_HOURS = _int_env("MIN_INTERVAL_HOURS", 4)
+# posted_in_window zaten ayni pencerede ikinci paylasimi engelliyor; bu esik
+# sadece dakikalar arayla gelen tekrar tetiklemelere karsi. Pencereler
+# genisledigi icin dusuruldu (sabah 14:59 + aksam 17:00 = 2.0 saat).
+MIN_INTERVAL_HOURS = _int_env("MIN_INTERVAL_HOURS", 2)
 
 # GitHub cron zamanlanmis calismalari rastgele dusuruyor - bu repoda 2/2
 # kacirdi. Cozum: saat basi denemek ve pencere disinda hicbir sey yapmamak.
 # Sabah 09-12, aksam 18-21 (TR). Her pencerede 4 deneme sansi var; biri
 # tutarsa o pencere icin is bitmis olur.
 TZ_OFFSET_HOURS = _int_env("TZ_OFFSET_HOURS", 3)   # Turkiye UTC+3, DST yok
-POST_WINDOWS = _str_env("POST_WINDOWS", "9-12,18-21")
+# Pencere genisligi olculdu, tahmin degil: 5-6 Eylul 2026'da GitHub saat basi
+# tetiklemelerin %39'unu calistirdi (7/18) ve araliklar 2.0-5.0 saat arasindaydi.
+# 3 saatlik pencere bu boslukta tamamen kacirilabiliyor - 6 Eylul sabahi oyle
+# oldu. 6 saatlik pencerede 6 sans var; %61 dusme oraniyla kacirma ihtimali
+# ~%5. Gec paylasmak, hic paylasmamaktan iyi.
+POST_WINDOWS = _str_env("POST_WINDOWS", "9-14,17-22")
 
 # Pencere kurali SADECE zamanlanmis calismalarda gecerli; elle tetiklemede
 # kullanici ne zaman isterse paylasabilmeli.

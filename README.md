@@ -29,7 +29,7 @@ sadece videolar hareket eder.
 | `setup_oauth.py` | Bir kerelik Drive yetkilendirmesi |
 | `refresh_token.py` | IG token'ının 60 günde ölmesini engeller |
 | `check_credentials.py` | Haftalık ömür denetimi — sessiz ölümü önler |
-| `.github/workflows/reels.yml` | Saat başı denenir, pencere içinde paylaşır (09-12 / 18-21 TR) |
+| `.github/workflows/reels.yml` | Saat başı denenir, pencere içinde paylaşır (09-14 / 17-22 TR) |
 | `.github/workflows/keepalive.yml` | Haftalık: token yenileme + repo'yu canlı tutma |
 
 ---
@@ -242,8 +242,9 @@ python check_credentials.py             # eşik altındaysa exit 1
 - **GitHub cron güvenilmez — buna göre tasarlandı.** GitHub zamanlanmış
   çalışmaları rastgele düşürüyor; bu repoda ilk iki deneme (`:00` ve `:17`)
   hiç tetiklenmedi (API'de `event=schedule` toplam 0). Bu yüzden cron **saat
-  başı** çalışır ve paylaşımı `POST_WINDOWS` (varsayılan `9-12,18-21` TR)
-  belirler. Her pencerede 4 tetiklenme şansı olur, biri tutunca pencere
+  başı** çalışır ve paylaşımı `POST_WINDOWS` (varsayılan `9-14,17-22` TR)
+  belirler. Ölçüldü: GitHub tetiklemelerin ~%39'unu çalıştırıyor, aralıklar 2-5 saat.
+  6 saatlik pencerede 6 şans olur, biri tutunca pencere
   kapanır. Pencere dışı çalışmalar Drive/IG'ye hiç dokunmadan ~5 saniyede
   biter; genel repolarda Actions dakikaları ücretsiz.
   Dakikası kritikse harici tetikleyici (cron-job.org → `workflow_dispatch`)
