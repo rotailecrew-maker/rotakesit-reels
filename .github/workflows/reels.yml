@@ -15,6 +15,23 @@ on:
     # biri tutunca o pencere kapanir. Pencere disi calismalar Drive/IG'ye
     # hic dokunmadan ~5 saniyede biter.
     - cron: "17 * * * *"
+
+  # HARICI TETIKLEYICI - GitHub cron'unun yedegi.
+  #
+  # 9 Eylul 2026: schedule arka arkaya 3 kez dusdu (05:17, 06:17, 07:17 UTC),
+  # ikisi paylasim penceresinin tam ortasindaydi. Saat basi deneme bile
+  # yetmedi. Cozum: ayni isi disaridan da tetiklemek (cron-job.org).
+  #
+  # Cift paylasim riski yok, uc katman engelliyor:
+  #   1. concurrency grubu -> iki calisma cakisirsa ikincisi bekler
+  #   2. MIN_INTERVAL_HOURS -> son paylasimdan 2 saat gecmeden yenisi olmaz
+  #   3. Drive'daki state.json -> yayinlanan video "published" isaretlenir
+  #
+  # Pencere kurali burada da gecerli (post_reel.py ENFORCE_WINDOW), yani
+  # harici tetikleyici 7/24 vursa bile pencere disinda hicbir sey yapmaz.
+  repository_dispatch:
+    types: [post-reel]
+
   workflow_dispatch:        # elle tetikleme
     inputs:
       dry_run:

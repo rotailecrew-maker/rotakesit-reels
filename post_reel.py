@@ -229,11 +229,15 @@ TZ_OFFSET_HOURS = _int_env("TZ_OFFSET_HOURS", 3)   # Turkiye UTC+3, DST yok
 # ~%5. Gec paylasmak, hic paylasmamaktan iyi.
 POST_WINDOWS = _str_env("POST_WINDOWS", "9-14,17-22")
 
-# Pencere kurali SADECE zamanlanmis calismalarda gecerli; elle tetiklemede
-# kullanici ne zaman isterse paylasabilmeli.
+# Pencere kurali otomatik tetiklemelerde gecerli; elle tetiklemede
+# (workflow_dispatch) kullanici ne zaman isterse paylasabilmeli.
+#
+# repository_dispatch da otomatiktir: harici tetikleyici (cron-job.org)
+# GitHub'in guvenilmez cron'unu yedeklemek icin saat basi vuruyor. Bunu
+# pencere disinda birakmak gece 03:00'te paylasim demek olurdu.
 ENFORCE_WINDOW = _bool_env(
     "ENFORCE_WINDOW",
-    os.environ.get("GITHUB_EVENT_NAME", "") == "schedule")
+    os.environ.get("GITHUB_EVENT_NAME", "") in ("schedule", "repository_dispatch"))
 STATE_RETENTION_DAYS = _int_env("STATE_RETENTION_DAYS", 90)
 
 # Graph API hata kodlari - bunlar dosyanin sucu degil, retry sayacini yakmasinlar
