@@ -2,7 +2,7 @@
 # habersiz kirar. Guncellemek icin: pip install -U -r requirements.txt
 # ardindan pip freeze ile buraya yazin ve DRY_RUN ile test edin.
 
-requests==2.32.3
+requests==2.32.5              # 2.32.4+: CVE-2024-47081 (.netrc sizintisi)
 google-api-python-client==2.149.0
 google-auth==2.35.0
 google-auth-oauthlib==1.2.1   # setup_oauth.py

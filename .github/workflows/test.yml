@@ -1,0 +1,29 @@
+name: testler
+
+# Gercek Drive/IG'ye dokunmaz, secret kullanmaz. Keepalive commit'leri
+# GITHUB_TOKEN ile atildigi icin bunu tetiklemez.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Bagimliliklar
+        run: pip install --quiet -r requirements.txt
+
+      - name: Birim testleri
+        run: python -m unittest discover -s tests -v

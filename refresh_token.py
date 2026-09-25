@@ -16,6 +16,13 @@ Calistirma:
   python refresh_token.py --force    # omru ne olursa olsun yeniler
   python refresh_token.py --check    # sadece rapor verir, degistirmez
 
+90 gunluk yeniden yetkilendirme (README > 90 gunluk Instagram adimi):
+  Graph API Explorer'in verdigi token KISA OMURLUDUR (~1-2 saat). Dogrudan
+  secret'a yazilirsa paylasim ayni gun durur. Once .env'deki
+  IG_ACCESS_TOKEN'a yazin, sonra bu scripti calistirin: omru 15 gunun
+  altinda oldugu icin uzun omurlu (60 gun) token'a cevirir, .env'i ve
+  (GH_TOKEN varsa) GitHub secret'ini gunceller.
+
 Gerekli:
   IG_APP_ID, IG_APP_SECRET, IG_ACCESS_TOKEN
 Opsiyonel (secret'i otomatik guncellemek icin):
@@ -43,8 +50,12 @@ GH_TOKEN = os.environ.get("GH_TOKEN", "").strip()
 GH_REPOSITORY = os.environ.get("GH_REPOSITORY", "").strip()
 SECRET_NAME = os.environ.get("TOKEN_SECRET_NAME", "IG_ACCESS_TOKEN").strip()
 
-# Bos deger de varsayilana dusmeli - GitHub tanimsiz variable'i bos string yapar
-REFRESH_BEFORE_DAYS = int(os.environ.get("REFRESH_BEFORE_DAYS", "").strip() or 15)
+# Bos (GitHub tanimsiz variable'i bos string yapar) ya da bozuk deger
+# varsayilana dusmeli - yenileme adimi ValueError ile cokmesin
+try:
+    REFRESH_BEFORE_DAYS = int(os.environ.get("REFRESH_BEFORE_DAYS", "").strip() or 15)
+except ValueError:
+    REFRESH_BEFORE_DAYS = 15
 
 
 def log(msg):
@@ -65,7 +76,10 @@ def token_days_left():
         params={"input_token": TOKEN, "access_token": f"{APP_ID}|{APP_SECRET}"},
         timeout=30,
     )
-    body = r.json()
+    try:
+        body = r.json()
+    except ValueError:
+        sys.exit(f"HATA - debug_token JSON donmedi (HTTP {r.status_code})")
     if "error" in body:
         sys.exit(f"HATA - debug_token: {body['error'].get('message')}")
 
@@ -91,7 +105,10 @@ def exchange():
         },
         timeout=30,
     )
-    body = r.json()
+    try:
+        body = r.json()
+    except ValueError:
+        body = {"http_status": r.status_code}
     if "access_token" not in body:
         sys.exit(f"HATA - token degistirilemedi: {json.dumps(body)[:300]}")
     return body["access_token"]
@@ -145,23 +162,28 @@ def update_github_secret(value):
 
 
 def sync_local_env(value):
-    """Yerelde .env varsa onu da gunceller.
+    """Yeni token'i yerel .env'e yazar (CI disinda). Yazildiysa True.
 
     Aksi halde GitHub secret yenilenirken yerel .env eski token'da kalir
-    ve yerel testler CI'dan farkli davranir.
+    ve yerel testler CI'dan farkli davranir. GH_TOKEN yoksa da token'i
+    ekrana basmadan kullaniciya ulastirmanin tek yolu bu dosya.
     """
-    if not os.path.exists(".env"):
-        return
-    with io.open(".env", encoding="utf-8") as fh:
-        lines = fh.read().splitlines()
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        return False
+    lines = []
+    if os.path.exists(".env"):
+        with io.open(".env", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
     for i, line in enumerate(lines):
         if line.strip().startswith("IG_ACCESS_TOKEN="):
             lines[i] = "IG_ACCESS_TOKEN=" + value
-            with io.open(".env", "w", encoding="utf-8",
-                         newline="\n") as fh:
-                fh.write("\n".join(lines) + "\n")
-            log("Yerel .env de guncellendi")
-            return
+            break
+    else:
+        lines.append("IG_ACCESS_TOKEN=" + value)
+    with io.open(".env", "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
+    log("Yerel .env guncellendi (IG_ACCESS_TOKEN satiri)")
+    return True
 
 
 def main():
@@ -194,13 +216,17 @@ def main():
     new_token = exchange()
     log(f"Yeni token alindi (uzunluk {len(new_token)}, icerigi loglanmaz)")
 
-    sync_local_env(new_token)
+    yerel = sync_local_env(new_token)
 
     if update_github_secret(new_token):
         return 0
 
     log("!!! Yeni token GitHub'a YAZILAMADI. Su adimlari elle yapin:")
-    log("    1. Graph API Explorer > uygulamaniz > token'i kopyalayin")
+    if yerel:
+        log("    1. .env dosyasindaki IG_ACCESS_TOKEN degerini kopyalayin")
+        log("       (Graph API Explorer'daki token'i DEGIL - o kisa omurlu)")
+    else:
+        log("    1. Bu scripti yerelde calistirin; yeni token .env'e yazilir")
     log("    2. Repo > Settings > Secrets and variables > Actions")
     log(f"    3. {SECRET_NAME} secret'ini guncelleyin")
     log("    (Otomatiklestirmek icin GH_TOKEN secret'i ekleyin - bkz README)")

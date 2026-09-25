@@ -17,9 +17,14 @@ Akis:
   2. Ilk uygun videoyu bul; hafta bitince sonrakine gec
   3. Caption'i o haftanin Capitons/ klasorunden ayni adla al
   4. Indir + boyut dogrula -> IG resumable upload -> poll -> publish
+     (publish'ten hemen once container id'si state.json'a "bekleyen" olarak
+     yazilir; calisma yarida kalirsa sonraki calisma container'in gercekten
+     yayinlanip yayinlanmadigini IG'ye sorar - cift paylasim olmaz)
   5. Basarili: videoyu kokteki published/ klasorune tasi
   6. Hatali: SADECE dosyaya ozgu hatalarda retry sayacini artir;
      token/kota/ag hatalari sayaci yakmaz. MAX_RETRIES'te failed/ klasorune.
+     Videoya bagli gecici hatalar (yukleme, isleme zaman asimi) ayri sayilir;
+     MAX_TRANSIENT_RETRIES'te video DEFER_HOURS ertelenir ve kuyruk tikanmaz.
 
 Caption dosyalari YERINDE KALIR - kutuphane gibi kullanildiklari icin
 tasinmazlar, sadece videolar hareket eder.
@@ -59,6 +64,15 @@ for _stream in (sys.stdout, sys.stderr):
 class TransientError(Exception):
     """Dosyayla ilgisi olmayan hata (token, kota, ag, izin).
     Retry sayaci ARTMAZ - yoksa saglam videolar failed/ klasorune surulur."""
+
+
+class FileTransientError(TransientError):
+    """Bu videoya bagli ama kalici oldugu kanitlanmamis hata (yukleme reddi,
+    isleme zaman asimi, indirme hatasi, Graph code 100).
+
+    Retry sayacini YAKMAZ (video failed/'a gitmez), ama transient_retries
+    sayacini artirir. MAX_TRANSIENT_RETRIES'te video DEFER_HOURS ertelenir -
+    yoksa kuyrugun basindaki tek bir sorunlu video tum kuyrugu kilitler."""
 
 
 class FileError(Exception):
@@ -167,13 +181,19 @@ PUBLISHED_FOLDER_ID = os.environ.get("DRIVE_PUBLISHED_FOLDER_ID", "").strip()
 FAILED_FOLDER_ID = os.environ.get("DRIVE_FAILED_FOLDER_ID", "").strip()
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
+# Kisayol, Google Docs vb. - indirilemezler (get_media 403 verir)
+GOOGLE_APPS_MIME_PREFIX = "application/vnd.google-apps."
 
 # Klasor adi eslesmeleri - hepsi harf duyarsiz
 REELS_NAMES = ("reels", "reel", "videolar")
 # "Capitons" mevcut yazim; "Captions" ileride duzeltilirse de calissin
 CAPTION_NAMES = ("capitons", "captions", "caption", "captionlar")
 # Kok altinda hafta sayilmayacak klasorler
-SKIP_ROOT_NAMES = {"published", "failed", "retry", "archive", "arsiv"}
+SKIP_ROOT_NAMES = {"published", "failed", "retry", "archive", "arsiv", "arşiv"}
+# Kok altinda SADECE hafta klasoru gibi gorunenler kuyruga girer:
+# "1. Hafta", "10.Hafta", "Hafta 3". "Arşiv", "Taslak", "Ham Çekim" gibi
+# klasorlerdeki videolar yanlislikla paylasilmasin.
+WEEK_RE = re.compile(r"^\s*\d|hafta\s*\d", re.IGNORECASE)
 
 # Etiketler - Reels'te user_tags sadece username alir, x/y koordinati yok
 USER_TAGS = [
@@ -189,15 +209,31 @@ DEFAULT_CAPTION = _str_env(
 )
 
 MAX_RETRIES = _int_env("MAX_RETRIES", 3)
+# Videoya bagli gecici hatalarda kac denemeden sonra video ertelensin.
+# Pencere icinde saat basi deneme var (gunde ~12); 6 = yaklasik yarim gun.
+MAX_TRANSIENT_RETRIES = _int_env("MAX_TRANSIENT_RETRIES", 6)
+DEFER_HOURS = _int_env("DEFER_HOURS", 24)
 STATE_FILENAME = "state.json"
+# state.json'da video olmayan tek anahtar: kuyruk sayisi, bildirim tarihleri
+META_KEY = "_meta"
+
+# Drive cagrilari icin otomatik tekrar (5xx, 429, rate limit 403, ag kopmasi).
+# Tek bir 500 yuzunden paylasim sonrasi state yazilamazsa ayni reel ikinci
+# kez paylasilirdi.
+DRIVE_RETRIES = _int_env("DRIVE_RETRIES", 4)
 
 POLL_INTERVAL = 5                                      # saniye
 POLL_TIMEOUT = _int_env("POLL_TIMEOUT", 480)           # 8 dk
-UPLOAD_TIMEOUT = _int_env("UPLOAD_TIMEOUT", 600)       # 10 dk / deneme
+# requests'te bu TOPLAM sure degil, tek bir okuma/yazma icin bekleme siniri
+UPLOAD_TIMEOUT = _int_env("UPLOAD_TIMEOUT", 600)
 UPLOAD_ATTEMPTS = _int_env("UPLOAD_ATTEMPTS", 3)
 # Yukleme tamamen basarisiz olursa sifirdan yeni container ile kac kez denensin
 CONTAINER_ATTEMPTS = _int_env("CONTAINER_ATTEMPTS", 2)
-# En kotu senaryo ~ indirme + 10 dk + 8 dk. Workflow timeout'u 45 dk.
+# Toplam calisma butcesi. Workflow timeout'u 45 dk; GitHub isi oldururse
+# hicbir sey kaydedilemez. Bu yuzden butce azalinca YENI deneme baslatilmaz
+# (baslamis bir publish her zaman tamamlanir).
+RUN_BUDGET_SECONDS = _int_env("RUN_BUDGET_SECONDS", 35 * 60)
+_STARTED = time.monotonic()
 
 VIDEO_EXTS = (".mp4", ".mov")
 MAX_VIDEO_BYTES = 1024 * 1024 * 1024                   # IG Reels siniri: 1 GB
@@ -211,7 +247,7 @@ TOKEN_WARN_DAYS = 7
 # cron 18:17'de calisirsa ikisi FARKLI videolar paylasir - state.json bunu
 # engellemez, o sadece AYNI videonun tekrarini engeller. Bu esik, son
 # paylasimdan bu yana yeterli sure gecmediyse calismayi sessizce bitirir.
-# 0 = kapali. Gunde 2 paylasim icin 6 saat guvenli (aralar 9 ve 15 saat).
+# 0 = kapali. Eskiden 6 (sonra 4) saatti;
 # posted_in_window zaten ayni pencerede ikinci paylasimi engelliyor; bu esik
 # sadece dakikalar arayla gelen tekrar tetiklemelere karsi. Pencereler
 # genisledigi icin dusuruldu (sabah 14:59 + aksam 17:00 = 2.0 saat).
@@ -219,8 +255,8 @@ MIN_INTERVAL_HOURS = _int_env("MIN_INTERVAL_HOURS", 2)
 
 # GitHub cron zamanlanmis calismalari rastgele dusuruyor - bu repoda 2/2
 # kacirdi. Cozum: saat basi denemek ve pencere disinda hicbir sey yapmamak.
-# Sabah 09-12, aksam 18-21 (TR). Her pencerede 4 deneme sansi var; biri
-# tutarsa o pencere icin is bitmis olur.
+# Varsayilan sabah 09-14, aksam 17-22 (TR, bitis saati dahil). Her pencerede
+# 6 deneme sansi var; biri tutarsa o pencere icin is bitmis olur.
 TZ_OFFSET_HOURS = _int_env("TZ_OFFSET_HOURS", 3)   # Turkiye UTC+3, DST yok
 # Pencere genisligi olculdu, tahmin degil: 5-6 Eylul 2026'da GitHub saat basi
 # tetiklemelerin %39'unu calistirdi (7/18) ve araliklar 2.0-5.0 saat arasindaydi.
@@ -229,32 +265,42 @@ TZ_OFFSET_HOURS = _int_env("TZ_OFFSET_HOURS", 3)   # Turkiye UTC+3, DST yok
 # ~%5. Gec paylasmak, hic paylasmamaktan iyi.
 POST_WINDOWS = _str_env("POST_WINDOWS", "9-14,17-22")
 
-# Pencere kurali otomatik tetiklemelerde gecerli; elle tetiklemede
-# (workflow_dispatch) kullanici ne zaman isterse paylasabilmeli.
+# Pencere kurali otomatik tetiklemelerde gecerli.
 #
 # repository_dispatch da otomatiktir: harici tetikleyici (cron-job.org)
 # GitHub'in guvenilmez cron'unu yedeklemek icin saat basi vuruyor. Bunu
 # pencere disinda birakmak gece 03:00'te paylasim demek olurdu.
+#
+# workflow_dispatch'te workflow ENFORCE_WINDOW'u "enforce_window" girdisinden
+# acikca verir (varsayilan acik). Boylece harici tetikleyici workflow_dispatch
+# API'sini de guvenle kullanabilir; elle hemen paylasmak icin kutu kaldirilir.
 ENFORCE_WINDOW = _bool_env(
     "ENFORCE_WINDOW",
     os.environ.get("GITHUB_EVENT_NAME", "") in ("schedule", "repository_dispatch"))
 STATE_RETENTION_DAYS = _int_env("STATE_RETENTION_DAYS", 90)
 
-# Graph API hata kodlari - bunlar dosyanin sucu degil, retry sayacini yakmasinlar
+# Graph API hata kodlari - bunlar dosyanin sucu degil, hicbir sayaci yakmasinlar
 TRANSIENT_GRAPH_CODES = {
     1,    # Unknown / gecici
     2,    # Service temporarily unavailable
     4,    # Application request limit reached
+    9,    # Paylasim limiti (subcode 2207042) - 24 saat dolunca gecer
     10,   # Permission denied
     17,   # User request limit reached
     32,   # Page request limit reached
-    100,  # Invalid parameter - pratikte konfig hatasi
     102,  # Session expired
     190,  # Access token gecersiz / suresi dolmus
     200,  # Permissions error
     341,  # Application limit reached
     368,  # Temporarily blocked
     613,  # Rate limit
+}
+
+# Videoya bagli olabilen ama kalici oldugu kesin olmayan kodlar.
+# failed/'a surmezler, ama tekrarlarsa video ertelenir (kuyruk tikanmaz).
+FILE_TRANSIENT_GRAPH_CODES = {
+    100,   # Invalid parameter - konfig hatasi da olabilir, caption/etiket de
+    9007,  # Media not ready for publishing (subcode 2207027)
 }
 
 
@@ -272,6 +318,11 @@ def redact(text):
 def log(msg):
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     print(f"[{ts}] {redact(msg)}", flush=True)
+
+
+def time_left():
+    """RUN_BUDGET_SECONDS'tan kalan saniye."""
+    return RUN_BUDGET_SECONDS - (time.monotonic() - _STARTED)
 
 
 # --------------------------------------------------------------------------
@@ -300,17 +351,23 @@ def graph_failure(resp, context):
 
     if resp.status_code >= 500 or code in TRANSIENT_GRAPH_CODES:
         return TransientError(detail)
+    # Kod cozulemediyse (JSON olmayan 4xx, proxy sayfasi vb.) videoyu
+    # suclamak icin kanit yok - retry hakki yakilmaz
+    if code is None or code in FILE_TRANSIENT_GRAPH_CODES:
+        return FileTransientError(detail)
     return FileError(detail)
 
 
 def drive_exec(request, context):
     """Drive cagrilarini calistirir, hatalari siniflandirir.
 
-    403 (izin/kota), 404 (paylasilmamis), 429 (rate limit), 5xx (sunucu) -
-    hicbiri videonun sucu degil, hepsi TransientError.
+    5xx, 429, rate limit 403 ve ag kopmalari once DRIVE_RETRIES kez ustel
+    beklemeyle tekrar denenir (googleapiclient num_retries). Yine olmazsa:
+    403 (izin/kota), 404 (paylasilmamis), 429, 5xx - hicbiri videonun sucu
+    degil, hepsi TransientError.
     """
     try:
-        return request.execute()
+        return request.execute(num_retries=DRIVE_RETRIES)
     except HttpError as e:
         status = getattr(e.resp, "status", 0)
         raise TransientError(
@@ -422,36 +479,64 @@ def find_folder(entries, names):
     return None
 
 
+def temp_video_path(video, prefix="reel_"):
+    """Gecici dosya yolu - video ADINDAN degil, guvenli bir addan.
+
+    Drive dosya adinda '/' olabilir ('Bolum 1/2.mp4'): os.path.join bunu
+    olmayan bir alt klasor sanar, '/' ile baslayan ad ise gecici klasorun
+    disina cikar. Ikisi de indirmeyi her seferinde patlatip kuyrugu kilitlerdi.
+    """
+    ext = os.path.splitext(video["name"])[1].lower()
+    if ext not in VIDEO_EXTS:
+        ext = ".mp4"
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=ext)
+    os.close(fd)
+    return path
+
+
 def download_file(drive, meta, dest_path):
-    """Indirir ve Drive'in bildirdigi boyutla karsilastirir."""
+    """Indirir ve Drive'in bildirdigi boyutla karsilastirir.
+
+    Hatalar FileTransientError: listeleme ayni kimlikle az once calisti,
+    yani sorun buyuk ihtimalle bu dosyada (indirme kapali, kisayol) ya da
+    agda. Retry hakki yakmaz ama tekrarlarsa video ertelenir.
+    """
     request = drive.files().get_media(fileId=meta["id"], supportsAllDrives=True)
     try:
         with io.FileIO(dest_path, "wb") as fh:
             downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
             done = False
             while not done:
-                _, done = downloader.next_chunk()
+                _, done = downloader.next_chunk(num_retries=DRIVE_RETRIES)
     except HttpError as e:
-        raise TransientError(
+        raise FileTransientError(
             f"Indirme hatasi: Drive HTTP {getattr(e.resp, 'status', 0)}") from e
     except Exception as e:
-        raise TransientError(f"Indirme hatasi: {type(e).__name__} {e}") from e
+        raise FileTransientError(f"Indirme hatasi: {type(e).__name__} {e}") from e
 
     expected = int(meta.get("size") or 0)
     actual = os.path.getsize(dest_path)
     if expected and actual != expected:
-        raise FileError(
+        # Kopan baglanti da buna yol acar - videonun bozuk oldugu kanitlanmadi
+        raise FileTransientError(
             f"Indirme eksik: {actual} bayt indi, {expected} bayt bekleniyordu")
     return actual
 
 
 def read_text_file(drive, file_id):
-    """UTF-8 dener, olmazsa cp1254 (Windows Notepad), o da olmazsa kayipli."""
+    """UTF-16 (BOM'lu), UTF-8, cp1254 (Windows Notepad), o da olmazsa kayipli."""
     data = drive_exec(
         drive.files().get_media(fileId=file_id, supportsAllDrives=True),
         f"Metin dosyasi okunamadi ({file_id})",
     )
-    for enc in ("utf-8-sig", "utf-8", "cp1254"):
+    # Notepad "Unicode" = UTF-16 + BOM. cp1254 bunu da hatasiz cozer ama
+    # her harfin arasina NUL koyar - bozuk caption paylasilirdi.
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return data.decode("utf-16").strip()
+        except UnicodeDecodeError:
+            pass
+    for enc in ("utf-8-sig", "cp1254"):
         try:
             return data.decode(enc).strip()
         except UnicodeDecodeError:
@@ -490,19 +575,40 @@ def load_state(drive, root_entries):
 
     ok=False ise state.json var ama okunamadi. O durumda UZERINE YAZMADAN
     cikmak gerekir - yoksa tum yayin gecmisi ve retry sayaclari silinir.
+
+    Birden fazla state.json varsa (ilk olusturma tekrar denenirse olabilir)
+    EN SON degistirilen kullanilir - rastgele secim gecmisi kaybettirirdi.
     """
-    for f in root_entries:
-        if f["name"] == STATE_FILENAME:
-            try:
-                raw = read_text_file(drive, f["id"])
-                return f["id"], json.loads(raw or "{}"), True
-            except Exception as e:
-                log(f"state.json okunamadi: {type(e).__name__} {e}")
-                return f["id"], {}, False
-    return None, {}, True
+    adaylar = [f for f in root_entries if f["name"] == STATE_FILENAME]
+    if not adaylar:
+        return None, {}, True
+    if len(adaylar) > 1:
+        log(f"UYARI: kokte {len(adaylar)} adet state.json var; en yenisi "
+            f"kullaniliyor. Digerlerini Drive'dan silin.")
+    f = max(adaylar, key=lambda x: x.get("modifiedTime") or "")
+    try:
+        raw = read_text_file(drive, f["id"])
+        state = json.loads(raw or "{}")
+        if not isinstance(state, dict):
+            raise ValueError("kok nesne sozluk degil")
+        return f["id"], state, True
+    except Exception as e:
+        log(f"state.json okunamadi: {type(e).__name__} {e}")
+        return f["id"], {}, False
+
+
+def video_entries(state):
+    """state.json'daki video kayitlari (_meta haric)."""
+    return [(k, v) for k, v in state.items()
+            if k != META_KEY and isinstance(v, dict)]
 
 
 def save_state(drive, state_file_id, state):
+    """state.json'u yazar, dosya id'sini dondurur.
+
+    Donen id saklanmali: ilk calismada dosya yoksa olusturulur ve ayni
+    calismadaki sonraki kayitlar YENI dosya acmak yerine onu guncellemeli.
+    """
     payload = json.dumps(state, ensure_ascii=False, indent=2)
     tmp_path = None
     try:
@@ -519,15 +625,16 @@ def save_state(drive, state_file_id, state):
                                          supportsAllDrives=True),
                     "state.json guncellenemedi",
                 )
-            else:
-                drive_exec(
-                    drive.files().create(
-                        body={"name": STATE_FILENAME, "parents": [ROOT_FOLDER_ID]},
-                        media_body=media, fields="id", supportsAllDrives=True,
-                    ),
-                    "state.json olusturulamadi (service account kullaniyorsaniz "
-                    "kotasi 0'dir; OAuth'a gecin veya dosyayi elle olusturun)",
-                )
+                return state_file_id
+            created = drive_exec(
+                drive.files().create(
+                    body={"name": STATE_FILENAME, "parents": [ROOT_FOLDER_ID]},
+                    media_body=media, fields="id", supportsAllDrives=True,
+                ),
+                "state.json olusturulamadi (service account kullaniyorsaniz "
+                "kotasi 0'dir; OAuth'a gecin veya dosyayi elle olusturun)",
+            )
+            return (created or {}).get("id")
         finally:
             # Windows'ta acik kalan tanitici unlink'i engelliyor
             fd = getattr(media, "_fd", None)
@@ -558,7 +665,12 @@ def to_local(when):
 
 
 def parse_windows(spec):
-    """"9-12,18-21" -> [(9, 12), (18, 21)]"""
+    """"9-14,17-22" -> [(9, 14), (17, 22)]. Bitis saati dahil (14:59'a kadar).
+
+    Gece yarisini asan pencere ("22-2") desteklenmez - "gunde bu pencerede
+    paylasim yapildi mi" kontrolu tarih degisince bozulur. Oyle bir parca
+    sessizce hic eslesmemek yerine uyariyla atlanir.
+    """
     out = []
     for parca in spec.split(","):
         parca = parca.strip()
@@ -567,11 +679,20 @@ def parse_windows(spec):
         try:
             if "-" in parca:
                 a, b = parca.split("-", 1)
-                out.append((int(a), int(b)))
+                lo, hi = int(a), int(b)
             else:
-                out.append((int(parca), int(parca)))
+                lo = hi = int(parca)
         except ValueError:
             log(f"UYARI: POST_WINDOWS icinde cozulemeyen parca: {parca!r}")
+            continue
+        if not (0 <= lo <= 23 and 0 <= hi <= 23):
+            log(f"UYARI: POST_WINDOWS parcasi 0-23 disinda, atlandi: {parca!r}")
+            continue
+        if lo > hi:
+            log(f"UYARI: POST_WINDOWS parcasi gece yarisini asiyor, desteklenmez "
+                f"({parca!r}); iki parcaya bolun, or. '{lo}-23,0-{hi}'")
+            continue
+        out.append((lo, hi))
     return out
 
 
@@ -585,7 +706,7 @@ def current_window(now_local, windows):
 def posted_in_window(state, now_local, window):
     """Bu pencerede bugun zaten paylasim yapildi mi?"""
     lo, hi = window
-    for entry in state.values():
+    for _, entry in video_entries(state):
         raw = entry.get("published_at")
         if not raw:
             continue
@@ -601,7 +722,7 @@ def posted_in_window(state, now_local, window):
 def last_published_at(state):
     """state.json'daki en son basarili paylasim zamani. Yoksa None."""
     stamps = []
-    for entry in state.values():
+    for _, entry in video_entries(state):
         raw = entry.get("published_at")
         if not raw:
             continue
@@ -625,15 +746,15 @@ def prune_state(state, live_ids):
         return 0
     cutoff = datetime.now(timezone.utc) - timedelta(days=STATE_RETENTION_DAYS)
     dropped = []
-    for file_id, entry in state.items():
-        if file_id in live_ids:
+    for file_id, entry in video_entries(state):
+        if file_id in live_ids or entry.get("pending_container"):
             continue
         stamp = entry.get("published_at") or entry.get("last_attempt")
         if not stamp:
             continue
         try:
             when = datetime.fromisoformat(stamp)
-        except ValueError:
+        except (ValueError, TypeError):
             continue
         if when.tzinfo is None:
             when = when.replace(tzinfo=timezone.utc)
@@ -655,18 +776,45 @@ def render_default_caption(stem):
     return DEFAULT_CAPTION.replace("{name}", stem)
 
 
+def ig_len(text):
+    """Karakter sayisi UTF-16 birimiyle - emoji 2 sayilir.
+
+    IG'nin 2200 sinirini nasil saydigi belgelenmemis; Python len() emojiyi 1
+    sayar. Temkinli olan (buyuk olan) olcu kullanilir, sinir asilmasin.
+    """
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _cut_ig(text, limit):
+    """text'in ig_len <= limit olan en uzun basi."""
+    units = 0
+    for i, ch in enumerate(text):
+        units += 2 if ord(ch) > 0xFFFF else 1
+        if units > limit:
+            return text[:i]
+    return text
+
+
 def normalize_caption(text):
     """IG limitlerine uydurur: 30 hashtag, 2200 karakter."""
-    tags = re.findall(r"#\w+", text, flags=re.UNICODE)
+    # Windows'ta yazilmis .txt CRLF getirir; IG'ye ve cift paylasim
+    # karsilastirmasina tek bicimde gitsin
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    tags = list(re.finditer(r"#\w+", text, flags=re.UNICODE))
     if len(tags) > CAPTION_MAX_HASHTAGS:
         fazla = tags[CAPTION_MAX_HASHTAGS:]
-        for tag in fazla:
-            text = text.replace(tag, "", 1)
-        text = re.sub(r"[ \t]{2,}", " ", text).strip()
+        # Tam olarak o konumlari sil - str.replace ilk eslesmeyi silerdi:
+        # fazla '#rota', bastaki '#rotakesit'i 'kesit'e cevirirdi
+        for m in reversed(fazla):
+            text = text[:m.start()] + text[m.end():]
+        text = re.sub(r"[ \t]{2,}", " ", text)
+        text = re.sub(r"[ \t]+\n", "\n", text).strip()
         log(f"UYARI: {len(tags)} hashtag vardi, son {len(fazla)} tanesi cikarildi "
             f"(IG siniri {CAPTION_MAX_HASHTAGS})")
-    if len(text) > CAPTION_MAX_CHARS:
-        text = text[:CAPTION_MAX_CHARS - 1].rstrip() + "..."
+    if ig_len(text) > CAPTION_MAX_CHARS:
+        # Tek karakterlik '…' - eskiden [:2199] + '...' 2202 karakter uretiyordu
+        text = _cut_ig(text, CAPTION_MAX_CHARS - 1).rstrip() + "…"
         log(f"UYARI: caption {CAPTION_MAX_CHARS} karaktere kisaltildi")
     return text
 
@@ -776,6 +924,9 @@ def upload_video(container_id, path):
     offset = 0
     last_error = None
     for attempt in range(1, UPLOAD_ATTEMPTS + 1):
+        if attempt > 1 and time_left() < 5 * 60:
+            last_error = f"{last_error} (calisma butcesi bitti, deneme kesildi)"
+            break
         try:
             with open(path, "rb") as fh:
                 fh.seek(offset)
@@ -813,19 +964,51 @@ def upload_video(container_id, path):
         log(f"Yukleme reddedildi ({last_error}), tekrar denenecek")
         offset = upload_offset(container_id)
 
-    raise TransientError(
+    # Videoya bagli ama kalici oldugu kanitlanmamis: 24 Eylul'de ayni video
+    # 17:47'de ProcessingFailedError ile dustu, 18:03'te sorunsuz yuklendi.
+    raise FileTransientError(
         f"Yukleme {UPLOAD_ATTEMPTS} denemede tamamlanamadi. Son hata: {last_error}")
 
 
+def container_status(container_id):
+    """Container'in status_code'u: IN_PROGRESS, FINISHED, PUBLISHED, ERROR, EXPIRED.
+
+    PUBLISHED, publish yaniti kaybolsa bile yayinin gerceklestigini kesin
+    olarak soyler - caption karsilastirmasina gerek kalmaz.
+    """
+    r = http(
+        "GET",
+        f"{GRAPH_HOST}/{container_id}",
+        params={"fields": "status_code,status", "access_token": IG_ACCESS_TOKEN},
+        timeout=30,
+    )
+    try:
+        body = r.json()
+    except ValueError:
+        body = {}
+    if r.status_code != 200 or not isinstance(body, dict) or "error" in body:
+        raise graph_failure(r, "Container durumu sorgulanamadi")
+    return body.get("status_code"), body.get("status")
+
+
 def wait_until_finished(container_id):
-    deadline = time.time() + POLL_TIMEOUT
+    # Publish icin en az 3 dk birak; butce azsa bekleme kisalir
+    budget = max(60, min(POLL_TIMEOUT, time_left() - 180))
+    deadline = time.time() + budget
     while time.time() < deadline:
-        r = http(
-            "GET",
-            f"{GRAPH_HOST}/{container_id}",
-            params={"fields": "status_code,status", "access_token": IG_ACCESS_TOKEN},
-            timeout=30,
-        )
+        try:
+            r = http(
+                "GET",
+                f"{GRAPH_HOST}/{container_id}",
+                params={"fields": "status_code,status",
+                        "access_token": IG_ACCESS_TOKEN},
+                timeout=30,
+            )
+        except TransientError as e:
+            # Tek bir ag kopmasi yuklenmis videoyu cope atmasin
+            log(f"Durum sorgusu basarisiz ({e}), tekrar denenecek")
+            time.sleep(POLL_INTERVAL)
+            continue
         try:
             body = r.json()
         except ValueError:
@@ -835,6 +1018,10 @@ def wait_until_finished(container_id):
             log(f"Durum sorgusu HTTP {r.status_code}, tekrar denenecek")
             time.sleep(POLL_INTERVAL)
             continue
+        if r.status_code != 200 or not isinstance(body, dict) or "error" in body:
+            # Token/izin hatasi 8 dk "Isleniyor... (None)" diye beklenmesin,
+            # hemen gercek hatayla dussun
+            raise graph_failure(r, "Durum sorgusu")
 
         code = body.get("status_code")
         if code == "FINISHED":
@@ -843,10 +1030,10 @@ def wait_until_finished(container_id):
             # Islemede hata = videonun kendisiyle ilgili (codec, sure, en-boy)
             raise FileError(f"Container ERROR: {body.get('status')}")
         if code == "EXPIRED":
-            raise TransientError(f"Container EXPIRED: {body.get('status')}")
+            raise FileTransientError(f"Container EXPIRED: {body.get('status')}")
         log(f"Isleniyor... ({code})")
         time.sleep(POLL_INTERVAL)
-    raise TransientError(f"Isleme {POLL_TIMEOUT}s icinde bitmedi")
+    raise FileTransientError(f"Isleme {budget:.0f}s icinde bitmedi")
 
 
 def publish(container_id):
@@ -865,13 +1052,15 @@ def publish(container_id):
     return body["id"]
 
 
-def find_recent_media(caption, minutes=60):
-    """Publish yaniti kaybolduysa gercekten yayinlanip yayinlanmadigini dogrular.
+def find_recent_media(caption, since=None):
+    """Son paylasimlarda bu caption ile baslayan reel'in media_id'si.
 
-    Bu olmadan: IG paylasimi yapar ama yanit timeout'a duser -> state'e
-    yazilmaz -> video kuyrukta kalir -> ayni reel ikinci kez paylasilir.
+    Yayinin OLUP OLMADIGINA container_status karar verir (PUBLISHED); bu
+    fonksiyon oncelikle media_id'yi bulmak icin, container sorgulanamazsa
+    da yedek kanit olarak kullanilir. `since`: bu andan (5 dk payla) once
+    paylasilanlar sayilmaz. Varsayilan son 60 dk.
     """
-    head = (caption or "").strip()[:80]
+    head = normalize_caption_head(caption)
     if not head:
         return None
     try:
@@ -885,7 +1074,12 @@ def find_recent_media(caption, minutes=60):
     except Exception:
         return None
 
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    if since is None:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=60)
+    else:
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        cutoff = since - timedelta(minutes=5)
     for item in data:
         try:
             when = datetime.strptime(item.get("timestamp", ""),
@@ -894,9 +1088,42 @@ def find_recent_media(caption, minutes=60):
             continue
         if when < cutoff:
             continue
-        if (item.get("caption") or "").strip().startswith(head):
+        if normalize_caption_head(item.get("caption"), None).startswith(head):
             return item.get("id")
     return None
+
+
+def normalize_caption_head(caption, n=80):
+    """Karsilastirma icin: satir sonlari tek bicim, bas/son bosluk yok."""
+    text = (caption or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    return text if n is None else text[:n]
+
+
+def recover_publish(container_id, caption, since):
+    """Publish hata verdi - reel yine de yayinlanmis olabilir mi?
+
+    (durum, media_id) dondurur:
+      "published"   container PUBLISHED (ya da caption'la bulundu)
+      "unpublished" container kesin yayinlanmamis (FINISHED/ERROR/EXPIRED)
+      "unknown"     IG'ye ulasilamadi - karar sonraki calismaya kalir
+    """
+    for deneme in range(3):
+        if deneme:
+            time.sleep(10)
+        try:
+            code, _ = container_status(container_id)
+        except Exception as e:
+            log(f"Container durumu sorgulanamadi ({e})")
+            continue
+        if code == "PUBLISHED":
+            return "published", find_recent_media(caption, since)
+        if code in ("FINISHED", "ERROR", "EXPIRED"):
+            return "unpublished", None
+        # IN_PROGRESS / bos - IG hala isliyor olabilir, tekrar sor
+    media_id = find_recent_media(caption, since)
+    if media_id:
+        return "published", media_id
+    return "unknown", None
 
 
 # --------------------------------------------------------------------------
@@ -927,9 +1154,17 @@ def discover_root(drive):
             f"ID'lerini verin."
         )
 
-    weeks = [f for f in folders
-             if f["name"].strip().lower() not in SKIP_ROOT_NAMES
-             and f["id"] not in (published, failed)]
+    weeks, ignored = [], []
+    for f in folders:
+        name = f["name"].strip()
+        if f["id"] in (published, failed) or name.lower() in SKIP_ROOT_NAMES:
+            continue
+        if WEEK_RE.search(name):
+            weeks.append(f)
+        else:
+            ignored.append(name)
+    if ignored:
+        log(f"Hafta klasoru sayilmadi, kuyruga girmez: {', '.join(sorted(ignored))}")
     weeks.sort(key=lambda f: natural_key(f["name"]))
     return entries, published, failed, weeks
 
@@ -953,51 +1188,175 @@ def week_contents(drive, week):
     return reels, videos, captions
 
 
+def scan_weeks(drive, weeks):
+    """Hafta agacini BIR KEZ listeler: [(hafta, reels, videolar, captionlar)].
+
+    Eskiden sweep ve pick_job ayni agaci ayri ayri listeliyordu.
+    """
+    scanned = []
+    for week in weeks:
+        reels, videos, captions = week_contents(drive, week)
+        if reels is None:
+            log(f"UYARI: {week['name']} icinde Reels klasoru veya video yok, atlandi")
+        for v in videos:
+            if (v["name"].lower().endswith(VIDEO_EXTS)
+                    and v["mimeType"].startswith(GOOGLE_APPS_MIME_PREFIX)):
+                log(f"UYARI: {week['name']}/{v['name']} bir Drive kisayolu/dokumani, "
+                    f"indirilemez - atlandi. Gercek video dosyasini koyun.")
+        scanned.append((week, reels, videos, captions))
+    return scanned
+
+
+def _parse_utc(raw):
+    try:
+        when = datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when
+
+
+def deferred_until(entry):
+    """Video ertelenmisse erteleme bitisi, degilse None."""
+    when = _parse_utc(entry.get("deferred_until"))
+    if when and when > datetime.now(timezone.utc):
+        return when
+    return None
+
+
 def eligible(video, state):
     entry = state.get(video["id"], {})
     return (video["name"].lower().endswith(VIDEO_EXTS)
+            and not video.get("mimeType", "").startswith(GOOGLE_APPS_MIME_PREFIX)
             and not entry.get("published")
-            and entry.get("retries", 0) < MAX_RETRIES)
+            and entry.get("retries", 0) < MAX_RETRIES
+            and not deferred_until(entry))
 
 
-def pick_job(drive, weeks, state):
-    """Hafta sirasiyla ilk uygun videoyu bulur; kuyruktaki tum id'leri de toplar."""
-    job, seen_ids = None, set()
-    for week in weeks:
-        reels, videos, captions = week_contents(drive, week)
+def pick_job(scanned, state):
+    """Hafta sirasiyla ilk uygun videoyu bulur.
+
+    (job, kuyruktaki tum id'ler, paylasilmayi bekleyen video sayisi) dondurur.
+    """
+    job, seen_ids, remaining = None, set(), 0
+    for week, reels, videos, captions in scanned:
         seen_ids.update(v["id"] for v in videos)
         if reels is None:
-            log(f"UYARI: {week['name']} icinde Reels klasoru veya video yok, atlandi")
             continue
-        if job is None:
-            adaylar = sorted((v for v in videos if eligible(v, state)),
-                             key=lambda f: natural_key(f["name"]))
-            if adaylar:
-                job = {"week": week, "reels": reels, "video": adaylar[0],
-                       "videos": videos, "captions": captions}
-    return job, seen_ids
+        adaylar = sorted((v for v in videos if eligible(v, state)),
+                         key=lambda f: natural_key(f["name"]))
+        remaining += len(adaylar)
+        if job is None and adaylar:
+            job = {"week": week, "reels": reels, "video": adaylar[0],
+                   "videos": videos, "captions": captions}
+    return job, seen_ids, remaining
 
 
-def sweep_exhausted(drive, weeks, state, failed_folder):
-    """MAX_RETRIES'i asmis videolari failed/ klasorune tasir - kuyruk tikanmasin.
-
-    Caption'lar YERINDE KALIR: Capitons/ bir kutuphane, sadece video hareket eder.
-    """
-    for week in weeks:
-        reels, videos, _ = week_contents(drive, week)
+def deferred_names(scanned, state):
+    """Su an ertelenmis videolarin adlari."""
+    out = []
+    for week, reels, videos, _ in scanned:
         if reels is None:
             continue
         for v in videos:
             entry = state.get(v["id"], {})
-            if entry.get("retries", 0) < MAX_RETRIES or entry.get("moved_to_failed"):
+            if not entry.get("published") and deferred_until(entry):
+                out.append(f"{week['name']}/{v['name']}")
+    return out
+
+
+def sweep(drive, scanned, state, published_folder, failed_folder):
+    """Kuyrukta durmamasi gereken videolari yerine tasir.
+
+    - MAX_RETRIES'i asmis olanlar -> failed/ (kuyruk tikanmasin)
+    - Yayinlanmis ama hala kuyrukta olanlar -> published/ (onceki calismada
+      tasima patladiysa ya da yayin sonradan dogrulandiysa)
+
+    Caption'lar YERINDE KALIR: Capitons/ bir kutuphane, sadece video hareket eder.
+    """
+    for week, reels, videos, _ in scanned:
+        if reels is None:
+            continue
+        for v in videos:
+            entry = state.get(v["id"])
+            if not entry:
+                continue
+            if entry.get("published"):
+                hedef, ad = published_folder, "published"
+            elif (entry.get("retries", 0) >= MAX_RETRIES
+                  and not entry.get("moved_to_failed")):
+                hedef, ad = failed_folder, "failed"
+            else:
                 continue
             try:
-                move_file(drive, v, failed_folder)
-                entry["moved_to_failed"] = True
-                state[v["id"]] = entry
-                log(f"failed/ klasorune tasindi: {week['name']}/{v['name']}")
+                move_file(drive, v, hedef)
+                if ad == "failed":
+                    entry["moved_to_failed"] = True
+                log(f"{ad}/ klasorune tasindi: {week['name']}/{v['name']}")
             except Exception as e:
-                log(f"failed/ tasima hatasi ({v['name']}): {e}")
+                log(f"{ad}/ tasima hatasi ({v['name']}): {e}")
+
+
+PENDING_KEYS = ("pending_container", "pending_at", "pending_caption")
+
+
+def resolve_pending(state):
+    """Onceki calismadan kalan dogrulanmamis publish'leri cozer.
+
+    Publish'ten hemen once container id'si state'e yazilir. Calisma o anda
+    olurse (timeout, iptal, state kaydinin patlamasi) video kuyrukta kalir
+    ve eskiden sonraki pencerede IKINCI KEZ paylasiliyordu. Artik container'a
+    sorulur: PUBLISHED ise yayinlanmis sayilir, degilse kayit temizlenir ve
+    video normal sirasiyla tekrar denenir.
+
+    IG'ye hic ulasilamazsa (ag, token, rate limit) TransientError firlatir -
+    o durumda bu calismada paylasim YAPILMAMALI.
+    Degisiklik olduysa True dondurur.
+    """
+    changed = False
+    for vid, entry in video_entries(state):
+        cid = entry.get("pending_container")
+        if not cid:
+            continue
+        ad = entry.get("name", vid)
+        since = _parse_utc(entry.get("pending_at"))
+
+        if entry.get("published"):
+            code, media_id = "PUBLISHED", entry.get("media_id")
+        else:
+            media_id = None
+            try:
+                code, _ = container_status(cid)
+            except (FileError, FileTransientError) as e:
+                # Container artik sorgulanamiyor (silinmis/gecersiz) - yedek
+                # kanit: son paylasimlarda ayni caption var mi
+                log(f"Bekleyen container {cid} sorgulanamadi ({e}); "
+                    f"caption ile araniyor")
+                media_id = find_recent_media(entry.get("pending_caption"), since)
+                code = "PUBLISHED" if media_id else None
+
+        if code == "PUBLISHED":
+            if not entry.get("published"):
+                media_id = media_id or find_recent_media(
+                    entry.get("pending_caption"), since)
+                entry.update({
+                    "published": True,
+                    "media_id": media_id,
+                    "container_id": cid,
+                    "published_at": entry.get("pending_at")
+                    or datetime.now(timezone.utc).isoformat(),
+                })
+                log(f"Onceki calisma {ad} videosunu YAYINLAMIS ama kaydedememis "
+                    f"(container {cid} PUBLISHED). Yayinlandi olarak isaretlendi - "
+                    f"tekrar paylasilmayacak.")
+        else:
+            log(f"Bekleyen container {cid} ({ad}) yayinlanmamis (durum: {code}); "
+                f"video kuyrukta sirasini koruyor.")
+        for k in PENDING_KEYS:
+            entry.pop(k, None)
+        changed = True
+    return changed
 
 
 # --------------------------------------------------------------------------
@@ -1009,7 +1368,18 @@ def run_dry(drive, weeks, state):
     log("DRY RUN - Instagram'a istek gonderilmeyecek, state yazilmayacak")
     log(f"Hafta sirasi: {', '.join(w['name'] for w in weeks) or '(yok)'}")
 
-    job, _ = pick_job(drive, weeks, state)
+    for vid, entry in video_entries(state):
+        if entry.get("pending_container"):
+            log(f"Dogrulanmayi bekleyen paylasim: {entry.get('name', vid)} "
+                f"(container {entry['pending_container']}) - canli calisma "
+                f"IG'ye sorup karar verecek")
+
+    scanned = scan_weeks(drive, weeks)
+    ertelenen = deferred_names(scanned, state)
+    if ertelenen:
+        log(f"Ertelenmis videolar: {', '.join(ertelenen)}")
+
+    job, _, remaining = pick_job(scanned, state)
     if not job:
         log("Kuyrukta yayinlanacak video yok")
         return 0
@@ -1023,13 +1393,15 @@ def run_dry(drive, weeks, state):
     log(f"Boyut           : {size / 1024 / 1024:.1f} MB "
         f"({'SINIR ASILDI' if size > MAX_VIDEO_BYTES else 'uygun'})")
     log(f"Caption dosyasi : {caption_file['name'] if caption_file else 'yok (sablon)'}")
+    log(f"Caption uzunlugu: {ig_len(caption)}/{CAPTION_MAX_CHARS}")
     log(f"Etiketler       : {', '.join(USER_TAGS) if USER_TAGS else 'yok'}")
     log(f"Bu haftada sira : {bekleyen} video bekliyor")
+    log(f"Kuyrukta toplam : {remaining} video bekliyor")
     log("--- caption ---")
     print(caption, flush=True)
     log("--- caption sonu ---")
 
-    tmp_path = os.path.join(tempfile.gettempdir(), f"dryrun_{job['video']['name']}")
+    tmp_path = temp_video_path(job["video"], prefix="dryrun_")
     try:
         log("Indirme dogrulaniyor...")
         actual = download_file(drive, job["video"], tmp_path)
@@ -1046,22 +1418,55 @@ def run_dry(drive, weeks, state):
 
 
 def _safe_save(drive, state_file_id, state):
-    """state kaydi da patlarsa asil hatayi golgede birakmasin."""
+    """state kaydi da patlarsa asil hatayi golgede birakmasin. Dosya id'si dondurur."""
     try:
-        save_state(drive, state_file_id, state)
+        return save_state(drive, state_file_id, state) or state_file_id
     except Exception as e:
         log(f"UYARI: state.json kaydedilemedi: {e}")
+        return state_file_id
+
+
+def handle_empty_queue(drive, state_file_id, state, scanned):
+    """Kuyruk bos: gunde BIR KEZ basarisiz cikar ki bildirim gitsin.
+
+    Eskiden exit 0'di - icerik bitince otomasyon sessizce dururdu. Her
+    calismada basarisiz olmak ise pencere icinde saatte bir bildirim demek.
+    """
+    meta = state.setdefault(META_KEY, {})
+    ertelenen = deferred_names(scanned, state)
+    if ertelenen:
+        log(f"Kuyrukta su an paylasilabilecek video yok. Ertelenmis "
+            f"({DEFER_HOURS} saat sonra tekrar denenecek): {', '.join(ertelenen)}")
+    else:
+        log("Kuyrukta yayinlanacak video yok")
+
+    today = local_now().date().isoformat()
+    if meta.get("empty_notified") == today:
+        log("(Bugun zaten bildirildi, bu calisma basarili sayiliyor.)")
+        _safe_save(drive, state_file_id, state)
+        return 0
+
+    meta["empty_notified"] = today
+    _safe_save(drive, state_file_id, state)
+    log("!!! KUYRUK BOS - hafta klasorlerine yeni video eklenene kadar paylasim "
+        "yapilmayacak. Bildirim gitsin diye bu calisma BASARISIZ sayiliyor "
+        "(gunde bir kez).")
+    return 1
 
 
 def main():
     log(f"rotakesit reels - {'DRY RUN' if DRY_RUN else 'canli mod'}")
 
-    # Pencere kontrolu EN BASTA: saat basi calisiyoruz, gunun 16 saatinde
+    # Pencere kontrolu EN BASTA: saat basi calisiyoruz, gunun buyuk kisminda
     # hicbir sey yapmadan cikmaliyiz - Drive/IG cagrisi bile yapmadan.
     pencere = None
     if ENFORCE_WINDOW and not DRY_RUN:
         simdi = local_now()
         pencereler = parse_windows(POST_WINDOWS)
+        if not pencereler:
+            log(f"HATA - POST_WINDOWS ({POST_WINDOWS!r}) gecerli bir pencere "
+                f"icermiyor; hic paylasim yapilamaz. Ornek: 9-14,17-22")
+            return 1
         pencere = current_window(simdi, pencereler)
         if not pencere:
             log(f"Saat {simdi:%H:%M} (TR) paylasim penceresi disinda "
@@ -1083,6 +1488,16 @@ def main():
     if DRY_RUN:
         return run_dry(drive, weeks, state)
 
+    # Onceki calisma publish sirasinda yarida kaldiysa ONCE onu coz -
+    # yoksa ayni video ikinci kez paylasilabilir
+    try:
+        if resolve_pending(state):
+            state_file_id = _safe_save(drive, state_file_id, state)
+    except TransientError as e:
+        log(f"GECICI HATA: bekleyen paylasim dogrulanamadi ({e}). Cift paylasim "
+            f"riskine girmemek icin bu calismada paylasim yapilmadi.")
+        return 1
+
     if pencere and posted_in_window(state, local_now(), pencere):
         log(f"Bu pencerede ({pencere[0]:02d}-{pencere[1]:02d} TR) bugun zaten "
             f"paylasim yapilmis. Bir sey yapilmadi.")
@@ -1101,19 +1516,24 @@ def main():
                     "ikiye katlamasini onler. MIN_INTERVAL_HOURS ile ayarlanir.")
                 return 0
 
-    sweep_exhausted(drive, weeks, state, failed_folder)
+    scanned = scan_weeks(drive, weeks)
+    sweep(drive, scanned, state, published_folder, failed_folder)
 
-    job, live_ids = pick_job(drive, weeks, state)
+    job, live_ids, remaining = pick_job(scanned, state)
     prune_state(state, live_ids)
+    meta = state.setdefault(META_KEY, {})
+    meta["queue_remaining"] = remaining
+    meta["queue_checked_at"] = datetime.now(timezone.utc).isoformat()
 
     if not job:
-        log("Kuyrukta yayinlanacak video yok")
-        _safe_save(drive, state_file_id, state)
-        return 0
+        return handle_empty_queue(drive, state_file_id, state, scanned)
 
     video = job["video"]
-    log(f"Secilen: {job['week']['name']}/{video['name']}")
+    log(f"Secilen: {job['week']['name']}/{video['name']} "
+        f"(kuyrukta {remaining} video)")
     entry = state.setdefault(video["id"], {"retries": 0})
+    entry["name"] = video["name"]
+    entry["week"] = job["week"]["name"]
     caption, _caption_file = resolve_caption(drive, job)
 
     # Indirmeden once boyut kontrolu - bosuna 20 dakika harcamayalim
@@ -1128,8 +1548,10 @@ def main():
         log(f"HATA: {entry['last_error']} - sonraki calismada failed/ klasorune")
         return 1
 
-    tmp_path = os.path.join(tempfile.gettempdir(), video["name"])
+    tmp_path = temp_video_path(video)
     container_id = None
+    publish_started = None
+    published_ok = False
     media_id = None
 
     try:
@@ -1139,6 +1561,10 @@ def main():
 
         last_err = None
         for deneme in range(1, CONTAINER_ATTEMPTS + 1):
+            if deneme > 1 and time_left() < 10 * 60:
+                log(f"Calisma butcesinde {time_left() / 60:.0f} dk kaldi, yeni "
+                    f"container denenmiyor (workflow timeout'una takilmasin)")
+                break
             try:
                 container_id = create_container(caption)
                 log(f"Container: {container_id}"
@@ -1152,22 +1578,46 @@ def main():
                 if deneme < CONTAINER_ATTEMPTS:
                     log(f"Gecici hata, yeni container ile tekrar: {err}")
                     time.sleep(10)
-        else:
+        if container_id is None:
             raise last_err
 
+        # Publish'ten ONCE isaretle: calisma bundan sonra olurse (timeout,
+        # iptal, state kaydinin patlamasi) sonraki calisma container'a sorar
+        entry["pending_container"] = container_id
+        entry["pending_at"] = datetime.now(timezone.utc).isoformat()
+        entry["pending_caption"] = normalize_caption_head(caption)
+        state[video["id"]] = entry
+        try:
+            state_file_id = save_state(drive, state_file_id, state) or state_file_id
+        except Exception as e:
+            log(f"UYARI: bekleyen paylasim isareti kaydedilemedi ({e}); "
+                f"yine de yayinlaniyor")
+
+        publish_started = datetime.now(timezone.utc)
         media_id = publish(container_id)
+        published_ok = True
         log(f"YAYINLANDI - media_id: {media_id}")
 
     except Exception as e:
         # Yayin gercekten olmus ama yanit kaybolmus olabilir
-        if container_id is not None:
-            recovered = find_recent_media(caption)
-            if recovered:
-                media_id = recovered
-                log(f"Hata alindi ama reel yayinlanmis (media_id: {media_id}) - "
-                    f"cift paylasim engellendi. Bastirilan hata: {e}")
+        if publish_started is not None:
+            durum, found = recover_publish(container_id, caption, publish_started)
+            if durum == "published":
+                published_ok, media_id = True, found
+                log(f"Hata alindi ama reel yayinlanmis (container PUBLISHED, "
+                    f"media_id: {found or 'bulunamadi'}) - cift paylasim "
+                    f"engellendi. Bastirilan hata: {e}")
+            elif durum == "unknown":
+                log(f"!!! Publish sonucu belirsiz ({e}). IG'ye ulasilamadi; "
+                    f"bekleyen isaret state'te kaliyor, sonraki calisma "
+                    f"container'a sorup karar verecek. Sayaclar degismedi.")
+                _safe_save(drive, state_file_id, state)
+                return 1
+            else:
+                for k in PENDING_KEYS:
+                    entry.pop(k, None)
 
-        if not media_id:
+        if not published_ok:
             entry["last_error"] = redact(e)[:500]
             entry["last_attempt"] = datetime.now(timezone.utc).isoformat()
 
@@ -1183,12 +1633,31 @@ def main():
                     log("Deneme hakki bitti - sonraki calismada failed/ klasorune")
             else:
                 entry["last_error_kind"] = "transient"
+                sabit = (f"retry sayaci {entry.get('retries', 0)}/{MAX_RETRIES} "
+                         f"sabit kaldi")
+                if isinstance(e, FileTransientError):
+                    n = entry.get("transient_retries", 0) + 1
+                    if n >= MAX_TRANSIENT_RETRIES:
+                        entry["transient_retries"] = 0
+                        entry["deferrals"] = entry.get("deferrals", 0) + 1
+                        entry["deferred_until"] = (
+                            datetime.now(timezone.utc)
+                            + timedelta(hours=DEFER_HOURS)).isoformat()
+                        log(f"GECICI HATA ({n}. kez ust uste, {sabit}): {e}")
+                        log(f"Video {DEFER_HOURS} saat ERTELENDI, sonraki calisma "
+                            f"siradaki videoya gecer. failed/'a tasinmadi.")
+                    else:
+                        entry["transient_retries"] = n
+                        log(f"GECICI HATA (videoya bagli {n}/{MAX_TRANSIENT_RETRIES}, "
+                            f"{sabit}): {e}")
+                        log("Video kuyrukta sirasini koruyor; ust uste "
+                            f"{MAX_TRANSIENT_RETRIES} kez olursa ertelenecek.")
+                else:
+                    log(f"GECICI HATA ({sabit}): {e}")
+                    log("Sebep dosya degil (token/kota/ag/izin). Sorunu giderin; "
+                        "video kuyrukta sirasini koruyor.")
                 state[video["id"]] = entry
                 _safe_save(drive, state_file_id, state)
-                log(f"GECICI HATA (retry sayaci {entry.get('retries', 0)}"
-                    f"/{MAX_RETRIES} sabit kaldi): {e}")
-                log("Sebep dosya degil (token/kota/ag/izin). Sorunu giderin; "
-                    "video kuyrukta sirasini koruyor.")
             return 1
 
     finally:
@@ -1199,26 +1668,43 @@ def main():
                 pass
 
     # --- Buradan sonrasi: yayin KESIN basarili ---
-    # Once state'e yaz: tasima patlasa bile ikinci kez paylasilmasin
     entry.update({
         "published": True,
         "media_id": media_id,
+        "container_id": container_id,
         "week": job["week"]["name"],
         "name": video["name"],
         "published_at": datetime.now(timezone.utc).isoformat(),
     })
+    for k in PENDING_KEYS + ("transient_retries", "deferred_until"):
+        entry.pop(k, None)
     state[video["id"]] = entry
-    save_state(drive, state_file_id, state)
+    meta["queue_remaining"] = max(remaining - 1, 0)
 
-    # Tasima hatasi yayini gecersiz kilmaz - job'u FAIL ETME, sadece uyar.
-    # Caption dosyasi yerinde birakilir (Capitons/ bir kutuphane).
+    # Once state: tasima patlasa bile ikinci kez paylasilmasin.
+    # drive_exec zaten DRIVE_RETRIES kez tekrar dener.
+    saved = True
+    try:
+        state_file_id = save_state(drive, state_file_id, state) or state_file_id
+    except Exception as e:
+        saved = False
+        log(f"!!! Reel yayinlandi ama state.json yazilamadi: {e}")
+
+    # Tasima state yazilamasa da denenir: video kuyruktan cikinca bir daha
+    # secilemez. Caption dosyasi yerinde birakilir (Capitons/ bir kutuphane).
     try:
         move_file(drive, video, published_folder)
         log("published/ klasorune tasindi")
     except Exception as e:
         log(f"UYARI: reel yayinlandi ama dosya tasinamadi ({e}). "
-            f"Drive'da elle tasiyin. Tekrar paylasilmaz (state'te isaretli).")
+            f"Sonraki calisma tekrar deneyecek.")
 
+    log(f"Kuyrukta {meta['queue_remaining']} video kaldi")
+    if not saved:
+        log("Sonraki calisma bekleyen isaretle container'i IG'ye sorup yayini "
+            "dogrulayacak; tekrar paylasilmaz. Bildirim icin calisma "
+            "BASARISIZ sayiliyor.")
+        return 1
     return 0
 
 

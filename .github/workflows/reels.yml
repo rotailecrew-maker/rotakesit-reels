@@ -11,9 +11,9 @@ on:
     # telafi eder.
     #
     # Paylasim penceresi post_reel.py icindeki POST_WINDOWS ile belirlenir
-    # (varsayilan 09-12 ve 18-21 TR). Her pencerede 4 tetiklenme sansi var;
-    # biri tutunca o pencere kapanir. Pencere disi calismalar Drive/IG'ye
-    # hic dokunmadan ~5 saniyede biter.
+    # (varsayilan 9-14 ve 17-22 TR, bitis saati dahil). Her pencerede 6
+    # tetiklenme sansi var; biri tutunca o pencere kapanir. Pencere disi
+    # calismalar Drive/IG'ye hic dokunmadan ~5 saniyede biter.
     - cron: "17 * * * *"
 
   # HARICI TETIKLEYICI - GitHub cron'unun yedegi.
@@ -29,15 +29,28 @@ on:
   #
   # Pencere kurali burada da gecerli (post_reel.py ENFORCE_WINDOW), yani
   # harici tetikleyici 7/24 vursa bile pencere disinda hicbir sey yapmaz.
+  #
+  # GUVENLIK: repository_dispatch icin PAT'e "Contents: write" gerekir; bu
+  # yetki repoya kod push edebilir, yani ucuncu taraftaki (cron-job.org)
+  # token sizarsa tum secret'lar sizar. Harici tetikleyici icin onerilen yol
+  # asagidaki workflow_dispatch + sadece "Actions: write" yetkili PAT
+  # (bkz README > Harici tetikleyici). Bu tetikleyici geriye uyumluluk icin
+  # duruyor.
   repository_dispatch:
     types: [post-reel]
 
-  workflow_dispatch:        # elle tetikleme
+  workflow_dispatch:        # elle tetikleme + harici tetikleyici
     inputs:
       dry_run:
         description: "Instagram'a hicbir sey gonderme, sadece dogrula"
         type: boolean
         default: false
+      # Varsayilan ACIK: harici tetikleyici API'yi girdisiz cagirir ve gece
+      # 03:00'te paylasmamali. Elle hemen paylasmak icin kutuyu kaldirin.
+      enforce_window:
+        description: "Paylasim penceresine uy (hemen paylasmak icin kaldirin)"
+        type: boolean
+        default: true
 
 concurrency:
   group: rotakesit-reels
@@ -49,7 +62,8 @@ permissions:
 jobs:
   post:
     runs-on: ubuntu-latest
-    # Bütce: indirme + upload 600s + poll 480s + kurulum. 30 dk yetmiyordu.
+    # post_reel.py kendi butcesini 35 dk tutar (RUN_BUDGET_SECONDS) ve bu
+    # sure azalinca yeni deneme baslatmaz; kalan pay kurulum icin.
     timeout-minutes: 45
 
     steps:
@@ -73,11 +87,19 @@ jobs:
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
           GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           DRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_ROOT_FOLDER_ID }}
-          # Opsiyonel ayarlar - repo Variables'tan (secret degil) gelir
+          # Opsiyonel ayarlar - repo Variables'tan (secret degil) gelir.
+          # Tanimsiz variable bos gelir, script o zaman varsayilani kullanir.
           USER_TAGS: ${{ vars.USER_TAGS }}
           GRAPH_VERSION: ${{ vars.GRAPH_VERSION }}
           MIN_INTERVAL_HOURS: ${{ vars.MIN_INTERVAL_HOURS }}
+          POST_WINDOWS: ${{ vars.POST_WINDOWS }}
+          MAX_RETRIES: ${{ vars.MAX_RETRIES }}
+          MAX_TRANSIENT_RETRIES: ${{ vars.MAX_TRANSIENT_RETRIES }}
+          DEFAULT_CAPTION: ${{ vars.DEFAULT_CAPTION }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          # workflow_dispatch: girdiye gore '1'/'0'. Diger olaylarda bos ->
+          # post_reel.py olay turune bakar (schedule/repository_dispatch = acik)
+          ENFORCE_WINDOW: ${{ github.event_name == 'workflow_dispatch' && (inputs.enforce_window && '1' || '0') || '' }}
         run: python post_reel.py
 
       - name: Hata bildirimi
