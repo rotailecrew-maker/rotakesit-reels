@@ -1,17 +1,20 @@
 name: keepalive + token yenileme
 
-# Iki sessiz olum sebebini birden onler:
+# Uc sessiz olum sebebini birden onler:
 #
 #   1. GitHub, 60 gun commit almayan repolarda zamanlanmis workflow'lari
 #      otomatik DEVRE DISI birakir. Bu otomasyon dogasi geregi commit almaz,
 #      yani kurulduktan 60 gun sonra kendiliginden dururdu.
 #   2. IG long-lived token'i 60 gunde doluyor.
+#   3. Paylasim sessizce durabilir: kuyruk biter, harici tetikleyici kapanir.
+#      check_credentials.py son paylasimin yasini ve kuyruk sayisini da denetler.
 #
-# Ikisi de ayni takvimde oldugu icin tek workflow'la cozuluyor.
+# GUNLUK calisir (saglik denetimi icin), ama keepalive commit'i haftada bir
+# atilir - 60 gun kurali icin fazlasiyla yeterli, gecmis de kirlenmez.
 
 on:
   schedule:
-    - cron: "0 4 * * 1"      # her pazartesi 07:00 TR
+    - cron: "0 4 * * *"      # her gun 07:00 TR (GitHub saatlerce geciktirebilir)
   workflow_dispatch:
 
 concurrency:
@@ -19,7 +22,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write            # bos commit atabilmek icin
+  contents: write            # keepalive commit'i atabilmek icin
 
 jobs:
   keepalive:
@@ -44,6 +47,7 @@ jobs:
           IG_APP_SECRET: ${{ secrets.IG_APP_SECRET }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GH_REPOSITORY: ${{ github.repository }}
+          GRAPH_VERSION: ${{ vars.GRAPH_VERSION }}
           REFRESH_BEFORE_DAYS: ${{ vars.REFRESH_BEFORE_DAYS }}
         run: |
           if [ -z "$IG_APP_ID" ] || [ -z "$IG_APP_SECRET" ]; then
@@ -52,7 +56,9 @@ jobs:
           fi
           python refresh_token.py
 
-      - name: Kimlik bilgisi omur denetimi
+      # Yenileme patlasa da denetim calissin - ikisi ayri sorunlari yakalar
+      - name: Kimlik bilgisi ve paylasim sagligi denetimi
+        if: ${{ !cancelled() }}
         env:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           IG_APP_ID: ${{ secrets.IG_APP_ID }}
@@ -60,12 +66,30 @@ jobs:
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
           GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+          DRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_ROOT_FOLDER_ID }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GRAPH_VERSION: ${{ vars.GRAPH_VERSION }}
+          STALE_POST_HOURS: ${{ vars.STALE_POST_HOURS }}
+          QUEUE_CRITICAL: ${{ vars.QUEUE_CRITICAL }}
         # Esige yaklasan bir sey varsa exit 1 -> GitHub maili + webhook
         run: python check_credentials.py
 
+      # Onceki adimlar BASARISIZ olsa da calisir. Eskiden kimlik denetimi
+      # kirmiziya dondugu an commit de duruyordu; sorun 60 gun cozulmezse
+      # GitHub zamanlanmis workflow'lari kapatir, alarmlar da susardi.
       - name: Repoyu canli tut
+        if: ${{ !cancelled() }}
         run: |
+          son=$(cat .keepalive 2>/dev/null || true)
+          son_ts=0
+          if [ -n "$son" ]; then
+            son_ts=$(date -u -d "$son" +%s 2>/dev/null || echo 0)
+          fi
+          gecen=$(( $(date -u +%s) - son_ts ))
+          if [ "$gecen" -lt $((6 * 86400)) ]; then
+            echo "Son keepalive: $son - haftalik commit henuz gerekmiyor"
+            exit 0
+          fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive
@@ -84,7 +108,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -z "$NOTIFY_WEBHOOK" ]; then exit 0; fi
-          MSG="rotakesit keepalive/token yenileme BASARISIZ - $RUN_URL"
+          MSG="rotakesit keepalive/saglik denetimi BASARISIZ - $RUN_URL"
           jq -n --arg m "$MSG" '{content: $m, text: $m}' \
             | curl -sS -X POST -H "Content-Type: application/json" \
                    -d @- "$NOTIFY_WEBHOOK" > /dev/null
