@@ -33,6 +33,8 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -64,6 +66,12 @@ class TransientError(Exception):
 class FileError(Exception):
     """Dosyaya ozgu hata (bozuk video, IG spec reddi, boyut).
     Retry sayaci ARTAR."""
+
+
+class ProcessingError(TransientError):
+    """IG transcoder'i videoyu isleyemedi (rupload ProcessingFailedError).
+    Retry sayacini yakmaz ama ayri sayilir: ust uste gelirse video ertelenir,
+    PROCESSING_FAIL_AFTER'da failed/ klasorune gider - kuyruk kilitlenmesin."""
 
 
 # --------------------------------------------------------------------------
@@ -197,7 +205,24 @@ UPLOAD_TIMEOUT = _int_env("UPLOAD_TIMEOUT", 600)       # 10 dk / deneme
 UPLOAD_ATTEMPTS = _int_env("UPLOAD_ATTEMPTS", 3)
 # Yukleme tamamen basarisiz olursa sifirdan yeni container ile kac kez denensin
 CONTAINER_ATTEMPTS = _int_env("CONTAINER_ATTEMPTS", 2)
-# En kotu senaryo ~ indirme + 10 dk + 8 dk. Workflow timeout'u 45 dk.
+# En kotu senaryo ~ indirme + 15 dk donusturme + 10 dk + 8 dk. Workflow timeout'u 45 dk.
+
+# Yuklemeden once ffmpeg ile IG'nin sorunsuz isledigi bicime cevir.
+# Olculdu (6-12 Ekim 2026): 37-46 MB videolarin 5/6'si saatlerce
+# "Video Transcoding Error: both HD and SD progressive failed" aldi,
+# 13-34 MB'lar hep ilk denemede gecti. IG zaten yeniden kodluyor, 8 Mbps
+# ara kodlama gozle gorulur kalite kaybi yaratmaz.
+TRANSCODE = _bool_env("TRANSCODE", True)
+TRANSCODE_MAXRATE = _str_env("TRANSCODE_MAXRATE", "8M")
+TRANSCODE_BUFSIZE = _str_env("TRANSCODE_BUFSIZE", "16M")
+TRANSCODE_TIMEOUT = _int_env("TRANSCODE_TIMEOUT", 900)       # 15 dk
+
+# ProcessingError ust uste gelirse: bu kadar basarisiz calismadan sonra video
+# PROCESSING_DEFER_HOURS boyunca ertelenir ve siradaki video paylasilir.
+# Toplam PROCESSING_FAIL_AFTER'a ulasinca failed/ klasorune gider.
+PROCESSING_DEFER_AFTER = _int_env("PROCESSING_DEFER_AFTER", 2)
+PROCESSING_DEFER_HOURS = _int_env("PROCESSING_DEFER_HOURS", 12)
+PROCESSING_FAIL_AFTER = _int_env("PROCESSING_FAIL_AFTER", 8)
 
 VIDEO_EXTS = (".mp4", ".mov")
 MAX_VIDEO_BYTES = 1024 * 1024 * 1024                   # IG Reels siniri: 1 GB
@@ -705,6 +730,70 @@ def resolve_caption(drive, job):
 
 
 # --------------------------------------------------------------------------
+# Video donusturme
+# --------------------------------------------------------------------------
+
+def ffmpeg_exe():
+    """Sistemdeki ffmpeg, yoksa imageio-ffmpeg'in getirdigi statik binary."""
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def transcode_for_ig(src, dst):
+    """Videoyu IG Reels spec'ine uygun H.264/AAC mp4'e cevirir.
+
+    Basarisiz olursa orijinal yolu dondurur: donusturme bir iyilestirme,
+    yayini engelleyen bir adim olmamali.
+    """
+    if not TRANSCODE:
+        return src
+    exe = ffmpeg_exe()
+    if not exe:
+        log("UYARI: ffmpeg bulunamadi, orijinal video yuklenecek")
+        return src
+
+    # Uzun kenar en fazla 1920, kenarlar cift (yuv420p sarti)
+    yatay = "gt(iw,ih)"
+    scale = (f"scale=w='if({yatay},trunc(min(iw,1920)/2)*2,-2)'"
+             f":h='if({yatay},-2,trunc(min(ih,1920)/2)*2)'")
+    cmd = [
+        exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+        "-i", src,
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", scale, "-fpsmax", "60",
+        "-c:v", "libx264", "-preset", "fast", "-profile:v", "high",
+        "-pix_fmt", "yuv420p", "-crf", "21",
+        "-maxrate", TRANSCODE_MAXRATE, "-bufsize", TRANSCODE_BUFSIZE,
+        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart",
+        dst,
+    ]
+    log("ffmpeg ile IG bicimine donusturuluyor...")
+    start = time.time()
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           errors="replace", timeout=TRANSCODE_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"UYARI: donusturme basarisiz ({type(e).__name__}), orijinal yuklenecek")
+        return src
+    if p.returncode != 0 or not os.path.exists(dst) or os.path.getsize(dst) == 0:
+        log(f"UYARI: donusturme basarisiz (kod {p.returncode}: "
+            f"{p.stderr.strip()[-300:]}), orijinal yuklenecek")
+        return src
+
+    log(f"Donusturuldu: {os.path.getsize(src) / 1024 / 1024:.1f} MB -> "
+        f"{os.path.getsize(dst) / 1024 / 1024:.1f} MB "
+        f"({time.time() - start:.0f} sn)")
+    return dst
+
+
+# --------------------------------------------------------------------------
 # Instagram
 # --------------------------------------------------------------------------
 
@@ -813,7 +902,8 @@ def upload_video(container_id, path):
         log(f"Yukleme reddedildi ({last_error}), tekrar denenecek")
         offset = upload_offset(container_id)
 
-    raise TransientError(
+    cls = ProcessingError if "ProcessingFailedError" in (last_error or "") else TransientError
+    raise cls(
         f"Yukleme {UPLOAD_ATTEMPTS} denemede tamamlanamadi. Son hata: {last_error}")
 
 
@@ -960,9 +1050,26 @@ def eligible(video, state):
             and entry.get("retries", 0) < MAX_RETRIES)
 
 
+def deferred(video, state):
+    """IG'nin isleyemedigi video erteleme suresi icinde mi?"""
+    until = state.get(video["id"], {}).get("defer_until")
+    if not until:
+        return False
+    try:
+        when = datetime.fromisoformat(until)
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) < when
+
+
 def pick_job(drive, weeks, state):
-    """Hafta sirasiyla ilk uygun videoyu bulur; kuyruktaki tum id'leri de toplar."""
-    job, seen_ids = None, set()
+    """Hafta sirasiyla ilk uygun videoyu bulur; kuyruktaki tum id'leri de toplar.
+
+    Ertelenmis videolar atlanir; baska aday yoksa yine de denenir.
+    """
+    job, fallback, seen_ids = None, None, set()
     for week in weeks:
         reels, videos, captions = week_contents(drive, week)
         seen_ids.update(v["id"] for v in videos)
@@ -972,9 +1079,19 @@ def pick_job(drive, weeks, state):
         if job is None:
             adaylar = sorted((v for v in videos if eligible(v, state)),
                              key=lambda f: natural_key(f["name"]))
-            if adaylar:
-                job = {"week": week, "reels": reels, "video": adaylar[0],
-                       "videos": videos, "captions": captions}
+            for v in adaylar:
+                aday = {"week": week, "reels": reels, "video": v,
+                        "videos": videos, "captions": captions}
+                if not deferred(v, state):
+                    job = aday
+                    break
+                if fallback is None:
+                    fallback = aday
+    if job is None and fallback is not None:
+        log(f"Sadece ertelenmis video kaldi, deneniyor: {fallback['video']['name']}")
+        job = fallback
+    elif fallback is not None:
+        log(f"Ertelenmis video atlandi: {fallback['video']['name']}")
     return job, seen_ids
 
 
@@ -1030,16 +1147,19 @@ def run_dry(drive, weeks, state):
     log("--- caption sonu ---")
 
     tmp_path = os.path.join(tempfile.gettempdir(), f"dryrun_{job['video']['name']}")
+    ig_path = os.path.join(tempfile.gettempdir(), "dryrun_ig.mp4")
     try:
         log("Indirme dogrulaniyor...")
         actual = download_file(drive, job["video"], tmp_path)
         log(f"Indirme tamam: {actual} bayt - Drive erisimi ve butunluk OK")
+        transcode_for_ig(tmp_path, ig_path)
     finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        for path in (tmp_path, ig_path):
+            if os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
     log("DRY RUN basarili - canli calisma icin DRY_RUN degiskenini kaldirin")
     return 0
@@ -1129,6 +1249,8 @@ def main():
         return 1
 
     tmp_path = os.path.join(tempfile.gettempdir(), video["name"])
+    ig_path = os.path.join(tempfile.gettempdir(),
+                           f"ig_{os.path.splitext(video['name'])[0]}.mp4")
     container_id = None
     media_id = None
 
@@ -1136,6 +1258,7 @@ def main():
         log("Drive'dan indiriliyor...")
         actual = download_file(drive, video, tmp_path)
         log(f"Indirildi: {actual / 1024 / 1024:.1f} MB")
+        upload_path = transcode_for_ig(tmp_path, ig_path)
 
         last_err = None
         for deneme in range(1, CONTAINER_ATTEMPTS + 1):
@@ -1143,7 +1266,7 @@ def main():
                 container_id = create_container(caption)
                 log(f"Container: {container_id}"
                     + (f" (deneme {deneme}/{CONTAINER_ATTEMPTS})" if deneme > 1 else ""))
-                upload_video(container_id, tmp_path)
+                upload_video(container_id, upload_path)
                 wait_until_finished(container_id)
                 break
             except TransientError as err:
@@ -1181,6 +1304,23 @@ def main():
                 log(f"DOSYA HATASI (deneme {entry['retries']}/{MAX_RETRIES}): {e}")
                 if entry["retries"] >= MAX_RETRIES:
                     log("Deneme hakki bitti - sonraki calismada failed/ klasorune")
+            elif isinstance(e, ProcessingError):
+                # Gecici sayilir ama sinirsiz degil: IG'nin hic isleyemedigi
+                # bir video yoksa kuyrugu sonsuza kadar kilitler.
+                n = entry.get("processing_failures", 0) + 1
+                entry["processing_failures"] = n
+                entry["last_error_kind"] = "processing"
+                log(f"IG ISLEME HATASI ({n}/{PROCESSING_FAIL_AFTER}): {e}")
+                if n >= PROCESSING_FAIL_AFTER:
+                    entry["retries"] = MAX_RETRIES
+                    log("IG bu videoyu isleyemiyor - sonraki calismada failed/ klasorune")
+                elif n >= PROCESSING_DEFER_AFTER:
+                    entry["defer_until"] = (datetime.now(timezone.utc)
+                                            + timedelta(hours=PROCESSING_DEFER_HOURS)).isoformat()
+                    log(f"Video {PROCESSING_DEFER_HOURS} saat ertelendi, "
+                        f"sonraki calisma siradaki videoyu paylasacak")
+                state[video["id"]] = entry
+                _safe_save(drive, state_file_id, state)
             else:
                 entry["last_error_kind"] = "transient"
                 state[video["id"]] = entry
@@ -1192,11 +1332,12 @@ def main():
             return 1
 
     finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        for path in (tmp_path, ig_path):
+            if os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
     # --- Buradan sonrasi: yayin KESIN basarili ---
     # Once state'e yaz: tasima patlasa bile ikinci kez paylasilmasin

@@ -168,6 +168,7 @@ Retry sayacı **yalnızca dosyanın kendi hatalarında** artar:
 |---|---|---|
 | `FileError` | Container ERROR (`status_code=ERROR`), 1 GB aşımı, eksik indirme | **artar** |
 | `TransientError` | Token dolmuş, rate limit, ağ kopması, Drive 403/5xx, **yükleme hataları** | **artmaz** |
+| `ProcessingError` | IG transcoder reddi (`ProcessingFailedError`) | artmaz, **ayrı sayılır** (aşağıda) |
 
 **Yükleme hataları neden dosya hatası sayılmaz:** `rupload.facebook.com` sadece
 byte alır, video içeriğini doğrulamaz — içerik kontrolü sonraki adımda,
@@ -179,6 +180,22 @@ içinde sıfırdan yeni container ile tekrar denenir (`CONTAINER_ATTEMPTS`).
 Bu ayrım olmasaydı: token'ın dolduğu bir haftada her çalışma sıradaki videonun
 bir retry hakkını yakar, 3 çalışmada **kusursuz bir video** `failed/` klasörüne
 sürülürdü. Günde 2 çalışmayla 1.5 günde bir video kaybı demekti.
+
+### Instagram işleme hataları (`ProcessingFailedError`)
+
+6-12 Ekim 2026'da 37-46 MB videoların çoğu saatlerce
+`Video Transcoding Error: both HD and SD progressive failed` aldı; 13-34 MB
+videolar hep ilk denemede geçti. İki önlem var:
+
+1. **Yüklemeden önce dönüştürme.** Video ffmpeg ile H.264 High / yuv420p /
+   en fazla 8 Mbps / AAC 48 kHz / `+faststart` biçimine çevrilir; uzun kenar
+   en fazla 1920, kare hızı en fazla 60. ffmpeg `imageio-ffmpeg` paketiyle
+   gelir. Dönüştürme başarısız olursa orijinal yüklenir. `TRANSCODE=0` kapatır.
+2. **Kuyruk kilitlenmez.** Bu hata geçici sayılır ama sınırsız değil: aynı video
+   `PROCESSING_DEFER_AFTER` (2) çalışma üst üste reddedilirse
+   `PROCESSING_DEFER_HOURS` (12) saat ertelenir ve sıradaki video paylaşılır.
+   Başka aday yoksa ertelenmiş video yine denenir. Toplam
+   `PROCESSING_FAIL_AFTER` (8) redde ulaşınca `failed/` klasörüne gider.
 
 ### Çift paylaşım koruması
 
