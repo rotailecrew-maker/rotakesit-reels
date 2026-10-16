@@ -766,12 +766,19 @@ def transcode_for_ig(src, dst):
         exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         "-i", src,
         "-map", "0:v:0", "-map", "0:a:0?",
-        "-vf", scale, "-fpsmax", "60",
+        # CFR, kare pikseller ve progressive video: kaynak zamanlamasi/SAR
+        # Instagram'in transcoder'ina tasinmasin.
+        "-vf", scale + ",setsar=1,fps=30",
         "-c:v", "libx264", "-preset", "fast", "-profile:v", "high",
         "-pix_fmt", "yuv420p", "-crf", "21",
+        "-flags", "+cgop", "-g", "60", "-keyint_min", "60",
+        "-sc_threshold", "0", "-bf", "0",
         "-maxrate", TRANSCODE_MAXRATE, "-bufsize", TRANSCODE_BUFSIZE,
         "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
-        "-movflags", "+faststart",
+        # Meta MP4'te edit list istemiyor. faststart tek basina edit list'i
+        # kaldirmaz; B-frame kapali oldugundan video DTS yeniden siralanmaz.
+        "-movflags", "+faststart", "-use_editlist", "0",
+        "-avoid_negative_ts", "disabled",
         dst,
     ]
     log("ffmpeg ile IG bicimine donusturuluyor...")
@@ -893,11 +900,16 @@ def upload_video(container_id, path):
             log(f"Yuklendi: {size / 1024 / 1024:.1f} MB")
             return
 
-        # rupload sadece byte alir, video icerigini DOGRULAMAZ - icerik
-        # kontrolu wait_until_finished'te yapilir (status_code=ERROR).
-        # Bu yuzden yukleme hatasi "video bozuk" demek degildir ve retry
-        # sayacini yakmamalidir. ProcessingFailedError bunun tipik ornegi:
-        # retriable:false dese de spec'i kusursuz videolarda da gorulur.
+        # rupload da isleme hatasi dondurebilir. Kalici olarak reddedilmis
+        # container'a ayni byte'lari tekrar gondermek sonucu degistirmez.
+        debug = body.get("debug_info", {}) if isinstance(body, dict) else {}
+        if (isinstance(debug, dict)
+                and debug.get("type") == "ProcessingFailedError"
+                and debug.get("retriable") is False):
+            raise ProcessingError(
+                f"IG yuklemeyi isleyemedi: HTTP {r.status_code}: "
+                f"{redact(r.text)[:1000]}")
+
         last_error = f"HTTP {r.status_code}: {r.text[:200]}"
         log(f"Yukleme reddedildi ({last_error}), tekrar denenecek")
         offset = upload_offset(container_id)
