@@ -34,6 +34,10 @@ on:
 
   workflow_dispatch:        # elle tetikleme
     inputs:
+      diagnostic_container:
+        description: "Sadece bu container durumunu sorgula; video yayinlama"
+        type: string
+        default: ""
       dry_run:
         description: "Instagram'a hicbir sey gonderme, sadece dogrula"
         type: boolean
@@ -63,7 +67,33 @@ jobs:
       - name: Bagimliliklar
         run: pip install --quiet -r requirements.txt
 
+      - name: Container durumunu sorgula (yayin yapmaz)
+        if: inputs.diagnostic_container != ''
+        env:
+          CONTAINER_ID: ${{ inputs.diagnostic_container }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          GRAPH_VERSION: ${{ vars.GRAPH_VERSION }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request, urllib.parse, urllib.error
+          cid = os.environ["CONTAINER_ID"].strip()
+          if not cid.isdigit():
+              raise SystemExit("Container ID yalnizca rakam olmali")
+          token = os.environ["IG_ACCESS_TOKEN"]
+          version = os.environ.get("GRAPH_VERSION", "").strip() or "v23.0"
+          query = urllib.parse.urlencode({"fields": "status_code,status"})
+          url = f"https://graph.facebook.com/{version}/{cid}?{query}"
+          req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+          try:
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  body = response.read().decode()
+          except urllib.error.HTTPError as error:
+              body = error.read().decode()
+          print(body.replace(token, "***") if token else body)
+          PY
+
       - name: Reel yayinla
+        if: inputs.diagnostic_container == ''
         env:
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
