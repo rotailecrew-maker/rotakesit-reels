@@ -746,7 +746,7 @@ def ffmpeg_exe():
         return None
 
 
-def transcode_for_ig(src, dst):
+def transcode_for_ig(src, dst, compatibility=False):
     """Videoyu IG Reels spec'ine uygun H.264/AAC mp4'e cevirir.
 
     Basarisiz olursa orijinal yolu dondurur: donusturme bir iyilestirme,
@@ -761,16 +761,18 @@ def transcode_for_ig(src, dst):
 
     # Daha dusuk bit hizi ve 1280 uzun kenar, IG transcoder yukunu azaltir.
     yatay = "gt(iw,ih)"
-    scale = (f"scale=w='if({yatay},trunc(min(iw,1280)/2)*2,-2)'"
-             f":h='if({yatay},-2,trunc(min(ih,1280)/2)*2)'")
+    edge = 960 if compatibility else 1280
+    scale = (f"scale=w='if({yatay},trunc(min(iw,{edge})/2)*2,-2)'"
+             f":h='if({yatay},-2,trunc(min(ih,{edge})/2)*2)'")
     cmd = [
         exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         "-i", src,
         "-map", "0:v:0", "-map", "0:a:0?",
         # CFR, kare pikseller ve progressive video: kaynak zamanlamasi/SAR
         # Instagram'in transcoder'ina tasinmasin.
-        "-vf", scale + ",setsar=1,fps=30",
-        "-c:v", "libx264", "-preset", "fast", "-profile:v", "high",
+        "-vf", scale + ",setsar=1,fps=30,setpts=PTS-STARTPTS",
+        "-c:v", "libx264", "-preset", "fast", "-profile:v",
+        "baseline" if compatibility else "high",
         "-pix_fmt", "yuv420p", "-crf", "23",
         "-flags", "+cgop", "-g", "60", "-keyint_min", "60",
         "-sc_threshold", "0", "-bf", "0",
@@ -782,6 +784,11 @@ def transcode_for_ig(src, dst):
         "-avoid_negative_ts", "disabled",
         dst,
     ]
+    if compatibility:
+        # Baseline/CAVLC, 540x960 dikey video ve sifirdan ses zamanlamasi.
+        # Kaynak icerik kesilmez; kisa ses parcasi sessizlikle tamamlanir.
+        cmd[-1:-1] = ["-level:v", "3.1", "-af",
+                      "aresample=async=1:first_pts=0,apad", "-shortest"]
     log("ffmpeg ile IG bicimine donusturuluyor...")
     start = time.time()
     try:
@@ -1272,6 +1279,8 @@ def main():
     tmp_path = os.path.join(tempfile.gettempdir(), video["name"])
     ig_path = os.path.join(tempfile.gettempdir(),
                            f"ig_{os.path.splitext(video['name'])[0]}.mp4")
+    compatibility_path = os.path.join(tempfile.gettempdir(),
+                                     f"ig_compat_{video['id']}.mp4")
     container_id = None
     media_id = None
 
@@ -1294,6 +1303,10 @@ def main():
                 # Patlayan container kullanilamaz, sifirdan yenisi acilir
                 last_err, container_id = err, None
                 if deneme < CONTAINER_ATTEMPTS:
+                    if isinstance(err, ProcessingError) and TRANSCODE:
+                        log("IG isleme reddi: ikinci container icin uyumluluk profili deneniyor")
+                        upload_path = transcode_for_ig(
+                            tmp_path, compatibility_path, compatibility=True)
                     log(f"Gecici hata, yeni container ile tekrar: {err}")
                     time.sleep(10)
         else:
@@ -1353,7 +1366,7 @@ def main():
             return 1
 
     finally:
-        for path in (tmp_path, ig_path):
+        for path in (tmp_path, ig_path, compatibility_path):
             if os.path.exists(path):
                 try:
                     os.unlink(path)
