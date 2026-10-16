@@ -213,8 +213,9 @@ CONTAINER_ATTEMPTS = _int_env("CONTAINER_ATTEMPTS", 2)
 # 13-34 MB'lar hep ilk denemede gecti. IG zaten yeniden kodluyor, 8 Mbps
 # ara kodlama gozle gorulur kalite kaybi yaratmaz.
 TRANSCODE = _bool_env("TRANSCODE", True)
-TRANSCODE_MAXRATE = _str_env("TRANSCODE_MAXRATE", "8M")
-TRANSCODE_BUFSIZE = _str_env("TRANSCODE_BUFSIZE", "16M")
+TRANSCODE_MAXRATE = _str_env("TRANSCODE_MAXRATE", "4M")
+TRANSCODE_BUFSIZE = _str_env("TRANSCODE_BUFSIZE", "8M")
+TRANSCODE_PROFILE = "ig-1280-cfr30-v2"
 TRANSCODE_TIMEOUT = _int_env("TRANSCODE_TIMEOUT", 900)       # 15 dk
 
 # ProcessingError ust uste gelirse: bu kadar basarisiz calismadan sonra video
@@ -758,10 +759,10 @@ def transcode_for_ig(src, dst):
         log("UYARI: ffmpeg bulunamadi, orijinal video yuklenecek")
         return src
 
-    # Uzun kenar en fazla 1920, kenarlar cift (yuv420p sarti)
+    # Daha dusuk bit hizi ve 1280 uzun kenar, IG transcoder yukunu azaltir.
     yatay = "gt(iw,ih)"
-    scale = (f"scale=w='if({yatay},trunc(min(iw,1920)/2)*2,-2)'"
-             f":h='if({yatay},-2,trunc(min(ih,1920)/2)*2)'")
+    scale = (f"scale=w='if({yatay},trunc(min(iw,1280)/2)*2,-2)'"
+             f":h='if({yatay},-2,trunc(min(ih,1280)/2)*2)'")
     cmd = [
         exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         "-i", src,
@@ -770,7 +771,7 @@ def transcode_for_ig(src, dst):
         # Instagram'in transcoder'ina tasinmasin.
         "-vf", scale + ",setsar=1,fps=30",
         "-c:v", "libx264", "-preset", "fast", "-profile:v", "high",
-        "-pix_fmt", "yuv420p", "-crf", "21",
+        "-pix_fmt", "yuv420p", "-crf", "23",
         "-flags", "+cgop", "-g", "60", "-keyint_min", "60",
         "-sc_threshold", "0", "-bf", "0",
         "-maxrate", TRANSCODE_MAXRATE, "-bufsize", TRANSCODE_BUFSIZE,
@@ -1064,6 +1065,10 @@ def eligible(video, state):
 
 def deferred(video, state):
     """IG'nin isleyemedigi video erteleme suresi icinde mi?"""
+    entry = state.get(video["id"], {})
+    if (TRANSCODE and entry.get("last_error_kind") == "processing"
+            and entry.get("transcode_profile") != TRANSCODE_PROFILE):
+        return False  # Eski kodlama profili yeni profilin denenmesini engellemesin.
     until = state.get(video["id"], {}).get("defer_until")
     if not until:
         return False
@@ -1246,6 +1251,10 @@ def main():
     video = job["video"]
     log(f"Secilen: {job['week']['name']}/{video['name']}")
     entry = state.setdefault(video["id"], {"retries": 0})
+    if TRANSCODE and entry.get("transcode_profile") != TRANSCODE_PROFILE:
+        entry["processing_failures"] = 0
+        entry.pop("defer_until", None)
+        entry["transcode_profile"] = TRANSCODE_PROFILE
     caption, _caption_file = resolve_caption(drive, job)
 
     # Indirmeden once boyut kontrolu - bosuna 20 dakika harcamayalim
